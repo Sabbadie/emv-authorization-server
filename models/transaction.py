@@ -1,5 +1,5 @@
 """
-Transaction model — avec champs TPA et tranche de montant.
+Transaction model — champs TPA, tranche montant, GIE CB.
 """
 
 import uuid
@@ -39,10 +39,20 @@ class Transaction:
         self.processed_at = None
         self.decline_reason = None
         self.rrn = self._generate_rrn()
-        # Champs TPA / tranche montant
+        # Tranches montant
         self.amount_tier = None
         self.risk_level = None
         self.auth_path = None
+        # Champs GIE CB
+        self.cb_scheme = None
+        self.cb_brand = None
+        self.cb_service_indicator = None
+        self.cb_sca_exemption = None
+        self.cb_floor_limit = None
+        self.cb_is_contactless = False
+        self.cb_response_code = None
+        self.cb_decline_reason = None
+        self.aid = None
 
     def _generate_rrn(self):
         now = datetime.utcnow()
@@ -93,6 +103,14 @@ class Transaction:
             "amount_tier": self.amount_tier,
             "risk_level": self.risk_level,
             "auth_path": self.auth_path,
+            "cb_scheme": self.cb_scheme,
+            "cb_brand": self.cb_brand,
+            "cb_service_indicator": self.cb_service_indicator,
+            "cb_sca_exemption": self.cb_sca_exemption,
+            "cb_floor_limit": self.cb_floor_limit,
+            "cb_is_contactless": self.cb_is_contactless,
+            "cb_response_code": self.cb_response_code,
+            "cb_decline_reason": self.cb_decline_reason,
             "created_at": self.created_at,
             "processed_at": self.processed_at,
         }
@@ -136,10 +154,7 @@ class TransactionLog:
                      if t.status == TransactionStatus.ERROR)
         total_amount = sum(t.amount for t in self._transactions.values()
                            if t.status == TransactionStatus.APPROVED)
-
-        by_tier = {}
-        by_path = {}
-        by_risk = {}
+        by_tier, by_path, by_risk, by_cb_scheme = {}, {}, {}, {}
         for t in self._transactions.values():
             if t.amount_tier:
                 by_tier[t.amount_tier] = by_tier.get(t.amount_tier, 0) + 1
@@ -147,7 +162,8 @@ class TransactionLog:
                 by_path[t.auth_path] = by_path.get(t.auth_path, 0) + 1
             if t.risk_level:
                 by_risk[t.risk_level] = by_risk.get(t.risk_level, 0) + 1
-
+            if t.cb_scheme:
+                by_cb_scheme[t.cb_scheme] = by_cb_scheme.get(t.cb_scheme, 0) + 1
         return {
             "total": total,
             "approved": approved,
@@ -160,6 +176,7 @@ class TransactionLog:
             "by_tier": by_tier,
             "by_auth_path": by_path,
             "by_risk_level": by_risk,
+            "by_cb_scheme": by_cb_scheme,
         }
 
 

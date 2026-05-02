@@ -1,5 +1,5 @@
 """
-EMV Authorization Logic — avec gestion par tranche de montant et réponse TPA
+EMV Authorization Logic — avec règles GIE CB, tranches montant et réponse TPA
 """
 
 import uuid
@@ -10,6 +10,7 @@ from emv.tlv import parse, find_tag, extract_emv_fields
 from emv.crypto import verify_arqc, CryptoError
 from emv.data_elements import CRYPTOGRAM_TYPE
 from emv.amount_rules import get_tier, evaluate_amount
+from emv.giecb import evaluate_cb_rules, identify_card, CB_RESPONSE_CODES
 from models.card import CardStatus, card_db
 from models.transaction import Transaction, TransactionStatus, transaction_log
 from models.tpa_response import TPAResponse
@@ -21,7 +22,7 @@ logger = logging.getLogger(__name__)
 class AuthorizationResult:
     def __init__(self, approved, response_code, auth_code=None,
                  issuer_auth_data=None, arpc=None, message=None,
-                 transaction=None, amount_decision=None):
+                 transaction=None, amount_decision=None, cb_result=None):
         self.approved = approved
         self.response_code = response_code
         self.auth_code = auth_code
@@ -30,12 +31,15 @@ class AuthorizationResult:
         self.message = message or Config.RESPONSE_CODES.get(response_code, "Unknown")
         self.transaction = transaction
         self.amount_decision = amount_decision
+        self.cb_result = cb_result
         self._tpa = None
 
     @property
     def tpa(self):
         if self._tpa is None and self.transaction:
-            self._tpa = TPAResponse(self.transaction, self, self.amount_decision)
+            self._tpa = TPAResponse(
+                self.transaction, self,
+                self.amount_decision, self.cb_result)
         return self._tpa
 
     def to_dict(self, include_tpa=True):
@@ -52,6 +56,8 @@ class AuthorizationResult:
             result["arpc"] = self.arpc
         if self.amount_decision:
             result["amount_decision"] = self.amount_decision.to_dict()
+        if self.cb_result:
+            result["cb_result"] = self.cb_result.to_dict()
         if self.transaction:
             result["transaction"] = self.transaction.to_dict()
         if include_tpa and self.tpa:
@@ -94,6 +100,9 @@ def _parse_emv_field55(field_55_hex):
             "app_version_card": get_value("9F08"),
             "app_version_terminal": get_value("9F09"),
             "aip": get_value("82"),
+            # Champs CB spécifiques
+            "consecutive_txn_limit": get_value("9F53"),
+            "cumulative_total_limit": get_value("9F54"),
             "all_fields": fields,
         }
     except Exception as e:
@@ -121,7 +130,7 @@ def check_tvr(tvr_bytes):
     if not tvr_bytes or len(tvr_bytes) < 5:
         return []
     flags = []
-    b1, b2, b3, b4, b5 = tvr_bytes[0], tvr_bytes[1], tvr_bytes[2], tvr_bytes[3], tvr_bytes[4]
+    b1, b2, b3, b4, b5 = tvr_bytes
     if b1 & 0x80: flags.append("Offline data authentication not performed")
     if b1 & 0x40: flags.append("SDA failed")
     if b1 & 0x20: flags.append("ICC data missing")
@@ -141,69 +150,123 @@ def check_tvr(tvr_bytes):
 def authorize(pan, amount, currency, transaction_type,
               field_55=None, terminal_id=None, merchant_id=None,
               merchant_name=None, pos_entry_mode="05",
-              skip_crypto=False):
+              skip_crypto=False, mcc=None, is_contactless=False):
     pan = pan.replace(" ", "")
     txn = Transaction(
-        pan=pan,
-        amount=amount,
-        currency=currency,
+        pan=pan, amount=amount, currency=currency,
         transaction_type=transaction_type,
-        terminal_id=terminal_id,
-        merchant_id=merchant_id,
-        merchant_name=merchant_name,
-        pos_entry_mode=pos_entry_mode,
+        terminal_id=terminal_id, merchant_id=merchant_id,
+        merchant_name=merchant_name, pos_entry_mode=pos_entry_mode,
     )
 
-    # ── Évaluation par tranche de montant ──────────────────────────────────
+    # ── 1. Évaluation par tranche de montant ─────────────────────────────────
     has_arqc = bool(field_55)
     daily_count = len(transaction_log.get_by_pan(pan, limit=200))
     amount_decision = evaluate_amount(amount, transaction_type,
-                                      daily_count=daily_count, has_arqc=has_arqc)
+                                      daily_count=daily_count,
+                                      has_arqc=has_arqc)
     txn.amount_tier = amount_decision.tier.name
     txn.risk_level = amount_decision.tier.risk_level
     txn.auth_path = amount_decision.auth_path
 
     if not amount_decision.allowed:
-        txn.decline(amount_decision.response_code, amount_decision.response_message)
+        txn.decline(amount_decision.response_code,
+                    amount_decision.response_message)
         transaction_log.add(txn)
         return AuthorizationResult(
             False, amount_decision.response_code,
             message=amount_decision.response_message,
             transaction=txn, amount_decision=amount_decision)
 
-    # ── Validation carte ───────────────────────────────────────────────────
+    # ── 2. Identification carte CB + règles GIE CB ────────────────────────────
     card = card_db.get_card(pan)
+    aid_hex = None
+    contactless_cumul = 0
+    consecutive_offline = 0
+
+    if card:
+        aid_hex = card.aid
+        contactless_cumul = card.contactless_cumul
+        consecutive_offline = card.consecutive_offline
+
+    # Extraire AID depuis champ 55 si présent
+    if field_55:
+        try:
+            tlv_list = parse(field_55)
+            aid_tag = find_tag(tlv_list, 0x4F)
+            if aid_tag:
+                aid_hex = aid_tag.value.hex().upper()
+        except Exception:
+            pass
+
+    cb_result = evaluate_cb_rules(
+        pan=pan, amount=amount, currency=currency,
+        transaction_type=transaction_type,
+        mcc=mcc, aid_hex=aid_hex,
+        is_contactless=is_contactless,
+        contactless_cumul=contactless_cumul,
+        consecutive_offline=consecutive_offline,
+        pos_entry_mode=pos_entry_mode,
+    )
+
+    # Enrichir la transaction avec les infos CB
+    txn.cb_scheme = identify_card(pan, aid_hex).scheme
+    txn.cb_brand = identify_card(pan, aid_hex).brand
+    txn.cb_service_indicator = cb_result.service_indicator
+    txn.cb_sca_exemption = cb_result.sca_exemption
+    txn.cb_floor_limit = cb_result.floor_limit_applied
+    txn.cb_is_contactless = cb_result.is_contactless
+    txn.cb_response_code = cb_result.cb_response_code
+    txn.cb_decline_reason = cb_result.cb_decline_reason
+
+    if not cb_result.allowed:
+        code = cb_result.response_code
+        msg = CB_RESPONSE_CODES.get(cb_result.cb_response_code, cb_result.response_message)
+        txn.decline(code, msg)
+        transaction_log.add(txn)
+        return AuthorizationResult(False, code, message=msg,
+                                   transaction=txn, amount_decision=amount_decision,
+                                   cb_result=cb_result)
+
+    # ── 3. Validation état de la carte ───────────────────────────────────────
     if not card:
         txn.decline("14", "Card not found")
         transaction_log.add(txn)
-        return AuthorizationResult(False, "14", transaction=txn, amount_decision=amount_decision)
+        return AuthorizationResult(False, "14", transaction=txn,
+                                   amount_decision=amount_decision, cb_result=cb_result)
 
     if card.status == CardStatus.LOST:
         txn.decline("41", "Lost card")
         transaction_log.add(txn)
-        return AuthorizationResult(False, "41", transaction=txn, amount_decision=amount_decision)
+        return AuthorizationResult(False, "41", transaction=txn,
+                                   amount_decision=amount_decision, cb_result=cb_result)
     if card.status == CardStatus.STOLEN:
         txn.decline("43", "Stolen card")
         transaction_log.add(txn)
-        return AuthorizationResult(False, "43", transaction=txn, amount_decision=amount_decision)
+        return AuthorizationResult(False, "43", transaction=txn,
+                                   amount_decision=amount_decision, cb_result=cb_result)
     if card.status in (CardStatus.BLOCKED, CardStatus.RESTRICTED):
         txn.decline("62", "Card blocked/restricted")
         transaction_log.add(txn)
-        return AuthorizationResult(False, "62", transaction=txn, amount_decision=amount_decision)
+        return AuthorizationResult(False, "62", transaction=txn,
+                                   amount_decision=amount_decision, cb_result=cb_result)
     if card.is_expired():
         txn.decline("54", "Expired card")
         transaction_log.add(txn)
-        return AuthorizationResult(False, "54", transaction=txn, amount_decision=amount_decision)
+        return AuthorizationResult(False, "54", transaction=txn,
+                                   amount_decision=amount_decision, cb_result=cb_result)
     if amount <= 0:
         txn.decline("13", "Invalid amount")
         transaction_log.add(txn)
-        return AuthorizationResult(False, "13", transaction=txn, amount_decision=amount_decision)
+        return AuthorizationResult(False, "13", transaction=txn,
+                                   amount_decision=amount_decision, cb_result=cb_result)
     if amount > Config.MAX_TRANSACTION_AMOUNT:
         txn.decline("61", "Amount exceeds maximum transaction limit")
         transaction_log.add(txn)
-        return AuthorizationResult(False, "61", transaction=txn, amount_decision=amount_decision)
+        return AuthorizationResult(False, "61", transaction=txn,
+                                   amount_decision=amount_decision, cb_result=cb_result)
 
-    # ── Traitement EMV (champ 55) ──────────────────────────────────────────
+    # ── 4. Traitement EMV (champ 55) ─────────────────────────────────────────
     emv_parsed = None
     atc_int = 0
     arqc_hex = None
@@ -215,7 +278,8 @@ def authorize(pan, amount, currency, transaction_type,
         if emv_parsed is None:
             txn.error("Failed to parse EMV data (field 55)")
             transaction_log.add(txn)
-            return AuthorizationResult(False, "30", transaction=txn, amount_decision=amount_decision)
+            return AuthorizationResult(False, "30", transaction=txn,
+                                       amount_decision=amount_decision, cb_result=cb_result)
 
         if emv_parsed.get("atc"):
             atc_int = int.from_bytes(emv_parsed["atc"], "big")
@@ -223,14 +287,16 @@ def authorize(pan, amount, currency, transaction_type,
             if atc_int <= card.last_atc:
                 txn.decline("05", "ATC replay detected")
                 transaction_log.add(txn)
-                return AuthorizationResult(False, "05", transaction=txn, amount_decision=amount_decision)
+                return AuthorizationResult(False, "05", transaction=txn,
+                                           amount_decision=amount_decision, cb_result=cb_result)
 
         if emv_parsed.get("cryptogram_info"):
             cid = emv_parsed["cryptogram_info"][0] & 0xC0
             if cid == 0x00:
                 txn.decline("05", "Card requested offline decline (AAC)")
                 transaction_log.add(txn)
-                return AuthorizationResult(False, "05", transaction=txn, amount_decision=amount_decision)
+                return AuthorizationResult(False, "05", transaction=txn,
+                                           amount_decision=amount_decision, cb_result=cb_result)
 
         if emv_parsed.get("cryptogram") and not skip_crypto:
             arqc_bytes = emv_parsed["cryptogram"]
@@ -245,7 +311,9 @@ def authorize(pan, amount, currency, transaction_type,
                 if not valid:
                     txn.decline("05", "Cryptogram verification failed")
                     transaction_log.add(txn)
-                    return AuthorizationResult(False, "05", transaction=txn, amount_decision=amount_decision)
+                    return AuthorizationResult(False, "05", transaction=txn,
+                                               amount_decision=amount_decision,
+                                               cb_result=cb_result)
             except CryptoError as e:
                 logger.error("Crypto error: %s", str(e))
 
@@ -257,18 +325,21 @@ def authorize(pan, amount, currency, transaction_type,
             if critical:
                 txn.decline("05", "Risk flag: " + critical[0])
                 transaction_log.add(txn)
-                return AuthorizationResult(False, "05", transaction=txn, amount_decision=amount_decision)
+                return AuthorizationResult(False, "05", transaction=txn,
+                                           amount_decision=amount_decision,
+                                           cb_result=cb_result)
 
-    # ── Contrôle provision ─────────────────────────────────────────────────
+    # ── 5. Contrôle provision ─────────────────────────────────────────────────
     if transaction_type in ["00", "09", "01"]:
         if not card.can_spend(amount):
             code = "51" if card.balance < amount else "61"
             reason = "Insufficient funds" if code == "51" else "Daily limit exceeded"
             txn.decline(code, reason)
             transaction_log.add(txn)
-            return AuthorizationResult(False, code, transaction=txn, amount_decision=amount_decision)
+            return AuthorizationResult(False, code, transaction=txn,
+                                       amount_decision=amount_decision, cb_result=cb_result)
 
-    # ── Génération ARPC ────────────────────────────────────────────────────
+    # ── 6. Génération ARPC ────────────────────────────────────────────────────
     auth_code = generate_auth_code()
     if field_55 and arqc_hex and card:
         try:
@@ -282,19 +353,29 @@ def authorize(pan, amount, currency, transaction_type,
         except Exception as e:
             logger.error("Failed to generate ARPC: %s", str(e))
 
+    # ── 7. Débitage et mise à jour compteurs CB ───────────────────────────────
     if transaction_type in ["00", "09"]:
         card.debit(amount)
     if atc_int > 0:
         card_db.update_atc(pan, atc_int)
 
+    # Mise à jour compteurs sans contact CB
+    if cb_result.is_contactless:
+        if amount_decision.auth_path == "OFFLINE":
+            card.update_contactless(amount)
+        else:
+            card.reset_contactless()
+
     txn.approve(auth_code, arpc=arpc_hex, issuer_auth_data=issuer_auth_data_hex)
     transaction_log.add(txn)
 
-    logger.info("Approved: ID=%s PAN=...%s Amt=%d Auth=%s Tier=%s Path=%s",
+    logger.info("Approved: ID=%s PAN=...%s Amt=%d Auth=%s Tier=%s Path=%s CB=%s SCA=%s",
                 txn.id, pan[-4:], amount, auth_code,
-                amount_decision.tier.name, amount_decision.auth_path)
+                amount_decision.tier.name, amount_decision.auth_path,
+                txn.cb_brand, cb_result.sca_exemption)
 
     return AuthorizationResult(
         True, "00", auth_code=auth_code,
         issuer_auth_data=issuer_auth_data_hex, arpc=arpc_hex,
-        transaction=txn, amount_decision=amount_decision)
+        transaction=txn, amount_decision=amount_decision,
+        cb_result=cb_result)

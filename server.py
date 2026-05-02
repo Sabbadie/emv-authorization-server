@@ -1,16 +1,18 @@
 """
-EMV Authorization Server - Flask REST API
-Inclut : historique, gestion par montant, réponses TPA
+EMV Authorization Server — Flask REST API
+Inclut : déblocage carte, règles GIE CB, historique, tranches montant, TPA
 """
 
 import logging
-import uuid
 from datetime import datetime
 from flask import Flask, request, jsonify, render_template_string
 
 from emv.authorization import authorize
 from emv.tlv import parse, extract_emv_fields
-from emv.amount_rules import get_all_tiers, get_tier, add_custom_tier, delete_custom_tier
+from emv.amount_rules import get_all_tiers, evaluate_amount, add_custom_tier, delete_custom_tier
+from emv.giecb import (CB_AIDS, CB_MCC_FLOOR_LIMITS, CB_CONTACTLESS, CB_CAP, CB_TAP,
+                        CB_RESPONSE_CODES, CB_SCA_EXEMPTIONS, CB_SERVICE_INDICATORS,
+                        identify_card, evaluate_cb_rules)
 from iso8583.message import parse_from_dict
 from models.card import card_db, Card, CardStatus
 from models.transaction import transaction_log, TransactionStatus
@@ -28,121 +30,130 @@ app.config["JSON_SORT_KEYS"] = False
 # ═══════════════════════════════════════════════════════════════════════════════
 # DASHBOARD HTML
 # ═══════════════════════════════════════════════════════════════════════════════
-DASHBOARD_HTML = """
+DASHBOARD_HTML = r"""
 <!DOCTYPE html>
 <html lang="fr">
 <head>
 <meta charset="UTF-8">
-<meta name="viewport" content="width=device-width, initial-scale=1.0">
-<title>Serveur d'Autorisation EMV</title>
+<meta name="viewport" content="width=device-width,initial-scale=1.0">
+<title>Serveur d'Autorisation EMV — GIE CB</title>
 <style>
 *{box-sizing:border-box;margin:0;padding:0}
 body{font-family:'Segoe UI',sans-serif;background:#0a0d14;color:#e2e8f0;min-height:100vh}
-.header{background:linear-gradient(135deg,#1a1f2e,#16213e);border-bottom:1px solid #2d3748;padding:18px 32px;display:flex;align-items:center;gap:14px}
-.logo{width:44px;height:44px;background:linear-gradient(135deg,#667eea,#764ba2);border-radius:10px;display:flex;align-items:center;justify-content:center;font-size:22px;flex-shrink:0}
-.header h1{font-size:20px;font-weight:700;color:#fff}
-.header p{color:#94a3b8;font-size:12px;margin-top:2px}
-.online-badge{margin-left:auto;background:#10b981;color:#fff;padding:4px 12px;border-radius:20px;font-size:12px;font-weight:600;display:flex;align-items:center;gap:6px}
-.online-badge::before{content:'';width:7px;height:7px;background:#fff;border-radius:50%;animation:pulse 2s infinite}
+.header{background:linear-gradient(135deg,#1a1f2e,#16213e);border-bottom:1px solid #2d3748;padding:16px 28px;display:flex;align-items:center;gap:12px}
+.logo{width:42px;height:42px;background:linear-gradient(135deg,#667eea,#764ba2);border-radius:10px;display:flex;align-items:center;justify-content:center;font-size:22px;flex-shrink:0}
+.header h1{font-size:19px;font-weight:700;color:#fff}
+.header p{color:#94a3b8;font-size:11px;margin-top:2px}
+.online-badge{margin-left:auto;background:#10b981;color:#fff;padding:4px 11px;border-radius:20px;font-size:11px;font-weight:600;display:flex;align-items:center;gap:5px}
+.online-badge::before{content:'';width:6px;height:6px;background:#fff;border-radius:50%;animation:pulse 2s infinite}
 @keyframes pulse{0%,100%{opacity:1}50%{opacity:.4}}
-.container{max-width:1400px;margin:0 auto;padding:24px 16px}
-.stats-grid{display:grid;grid-template-columns:repeat(auto-fit,minmax(180px,1fr));gap:12px;margin-bottom:24px}
-.stat{background:#1a1f2e;border:1px solid #2d3748;border-radius:10px;padding:16px}
-.stat .lbl{color:#64748b;font-size:11px;text-transform:uppercase;letter-spacing:.5px}
-.stat .val{font-size:26px;font-weight:700;margin:6px 0 3px}
-.stat .sub{color:#64748b;font-size:12px}
-.stat.blue .val{color:#60a5fa}.stat.green .val{color:#10b981}.stat.orange .val{color:#f59e0b}.stat.purple .val{color:#a78bfa}.stat.red .val{color:#f87171}.stat.teal .val{color:#2dd4bf}
-.section{background:#1a1f2e;border:1px solid #2d3748;border-radius:10px;margin-bottom:20px;overflow:hidden}
-.tabs{display:flex;gap:2px;padding:14px 20px 0;border-bottom:1px solid #2d3748;flex-wrap:wrap}
-.tab{padding:7px 14px;border-radius:8px 8px 0 0;font-size:13px;cursor:pointer;color:#64748b;background:transparent;border:none;border-bottom:2px solid transparent;white-space:nowrap}
+.container{max-width:1440px;margin:0 auto;padding:20px 14px}
+.stats-grid{display:grid;grid-template-columns:repeat(auto-fit,minmax(170px,1fr));gap:10px;margin-bottom:18px}
+.stat{background:#1a1f2e;border:1px solid #2d3748;border-radius:10px;padding:14px}
+.stat .lbl{color:#64748b;font-size:10px;text-transform:uppercase;letter-spacing:.5px}
+.stat .val{font-size:24px;font-weight:700;margin:4px 0 2px}
+.stat .sub{color:#64748b;font-size:11px}
+.stat.blue .val{color:#60a5fa}.stat.green .val{color:#10b981}.stat.orange .val{color:#f59e0b}
+.stat.purple .val{color:#a78bfa}.stat.red .val{color:#f87171}.stat.teal .val{color:#2dd4bf}
+.stat.cb .val{color:#fbbf24}
+.section{background:#1a1f2e;border:1px solid #2d3748;border-radius:10px;margin-bottom:18px;overflow:hidden}
+.tabs{display:flex;gap:1px;padding:12px 18px 0;border-bottom:1px solid #2d3748;flex-wrap:wrap}
+.tab{padding:6px 12px;border-radius:8px 8px 0 0;font-size:12px;cursor:pointer;color:#64748b;background:transparent;border:none;border-bottom:2px solid transparent;white-space:nowrap}
 .tab.active{color:#a78bfa;border-bottom-color:#a78bfa;background:#150f20}
 .tab-content{display:none}.tab-content.active{display:block}
-label{display:block;color:#94a3b8;font-size:12px;margin-bottom:5px;font-weight:500}
-input,select,textarea{width:100%;background:#0a0d14;border:1px solid #2d3748;color:#e2e8f0;border-radius:7px;padding:8px 11px;font-size:13px;font-family:inherit}
+label{display:block;color:#94a3b8;font-size:12px;margin-bottom:4px;font-weight:500}
+input,select,textarea{width:100%;background:#0a0d14;border:1px solid #2d3748;color:#e2e8f0;border-radius:6px;padding:7px 10px;font-size:13px;font-family:inherit}
 input:focus,select:focus,textarea:focus{outline:none;border-color:#667eea}
-.form-group{margin-bottom:12px}
-.btn{background:linear-gradient(135deg,#667eea,#764ba2);color:#fff;border:none;padding:10px 20px;border-radius:7px;font-size:14px;font-weight:600;cursor:pointer;width:100%;margin-top:3px}
+.form-group{margin-bottom:10px}
+.btn{background:linear-gradient(135deg,#667eea,#764ba2);color:#fff;border:none;padding:9px 18px;border-radius:7px;font-size:13px;font-weight:600;cursor:pointer;width:100%;margin-top:2px}
 .btn:hover{opacity:.9}.btn:disabled{opacity:.5;cursor:not-allowed}
-.btn-sm{background:#2d3748;color:#94a3b8;border:none;padding:5px 12px;border-radius:6px;font-size:12px;cursor:pointer}
+.btn-sm{background:#2d3748;color:#94a3b8;border:none;padding:4px 11px;border-radius:5px;font-size:12px;cursor:pointer}
 .btn-sm:hover{background:#374151;color:#e2e8f0}
-.btn-danger{background:#7f1d1d;color:#fca5a5;border:1px solid #991b1b}
-.btn-danger:hover{background:#991b1b}
-.result-box{background:#0a0d14;border:1px solid #2d3748;border-radius:7px;padding:14px;font-family:monospace;font-size:11.5px;color:#94a3b8;min-height:180px;white-space:pre-wrap;word-break:break-all;max-height:380px;overflow-y:auto}
+.btn-sm.success{background:#065f46;color:#34d399}
+.btn-sm.danger{background:#7f1d1d;color:#fca5a5;border:1px solid #991b1b}
+.btn-sm.danger:hover{background:#991b1b}
+.result-box{background:#0a0d14;border:1px solid #2d3748;border-radius:7px;padding:12px;font-family:monospace;font-size:11px;color:#94a3b8;min-height:160px;white-space:pre-wrap;word-break:break-all;max-height:360px;overflow-y:auto}
 .result-box.approved{border-color:#10b981;color:#34d399}
 .result-box.declined{border-color:#ef4444;color:#f87171}
 .result-box.error{border-color:#f59e0b;color:#fbbf24}
-.demo-grid{display:grid;grid-template-columns:1fr 1fr;gap:18px;padding:20px}
-@media(max-width:800px){.demo-grid{grid-template-columns:1fr}}
-/* Tables */
+.demo-grid{display:grid;grid-template-columns:1fr 1fr;gap:16px;padding:18px}
+@media(max-width:860px){.demo-grid{grid-template-columns:1fr}}
 table{width:100%;border-collapse:collapse}
-th{color:#64748b;font-size:11px;text-transform:uppercase;padding:10px 14px;text-align:left;border-bottom:1px solid #2d3748;white-space:nowrap}
-td{padding:10px 14px;font-size:13px;border-bottom:1px solid #1a2133;vertical-align:middle}
+th{color:#64748b;font-size:10px;text-transform:uppercase;padding:9px 12px;text-align:left;border-bottom:1px solid #2d3748;white-space:nowrap}
+td{padding:9px 12px;font-size:12px;border-bottom:1px solid #1a2133;vertical-align:middle}
 tr:last-child td{border-bottom:none}
 tr:hover td{background:#111827}
-.badge{display:inline-flex;align-items:center;padding:2px 8px;border-radius:10px;font-size:11px;font-weight:600;white-space:nowrap}
+.badge{display:inline-flex;align-items:center;padding:2px 7px;border-radius:9px;font-size:10px;font-weight:600;white-space:nowrap}
 .badge.APPROVED,.badge.approved{background:#052e16;color:#34d399;border:1px solid #065f46}
 .badge.DECLINED,.badge.declined{background:#2d0f0f;color:#f87171;border:1px solid #991b1b}
-.badge.ERROR,.badge.error{background:#2d1f0a;color:#fbbf24;border:1px solid #92400e}
+.badge.ERROR{background:#2d1f0a;color:#fbbf24;border:1px solid #92400e}
 .badge.ONLINE{background:#1e2a4a;color:#60a5fa;border:1px solid #1e40af}
 .badge.OFFLINE{background:#1a2a1a;color:#6ee7b7;border:1px solid #065f46}
 .badge.LOW{background:#052e16;color:#34d399;border:1px solid #065f46}
-.badge.MEDIUM{background:#1a2a1a;color:#fbbf24;border:1px solid #92400e}
-.badge.HIGH{background:#2d1f0a;color:#f97316;border:1px solid #c2410c}
+.badge.MEDIUM{background:#2a2a0a;color:#fbbf24;border:1px solid #92400e}
+.badge.HIGH{background:#2d1a0a;color:#f97316;border:1px solid #c2410c}
 .badge.VERY_HIGH,.badge.CRITICAL{background:#2d0f0f;color:#f87171;border:1px solid #991b1b}
 .badge.REFERRAL{background:#1f1a3a;color:#c4b5fd;border:1px solid #7c3aed}
+.badge.ACTIVE{background:#052e16;color:#34d399;border:1px solid #065f46}
+.badge.BLOCKED{background:#2d0f0f;color:#f87171;border:1px solid #991b1b}
+.badge.EXPIRED{background:#2d1f0a;color:#fbbf24;border:1px solid #92400e}
 /* Tier cards */
-.tier-grid{display:grid;grid-template-columns:repeat(auto-fill,minmax(260px,1fr));gap:14px;padding:20px}
-.tier-card{background:#111827;border:1px solid #2d3748;border-radius:10px;padding:16px}
-.tier-card .tier-name{font-weight:700;font-size:15px;color:#fff;margin-bottom:4px}
-.tier-card .tier-range{font-family:monospace;font-size:13px;color:#a78bfa}
-.tier-card .tier-desc{color:#64748b;font-size:12px;margin:8px 0}
-.tier-card .tier-flags{display:flex;flex-wrap:wrap;gap:6px;margin-top:10px}
-.tier-card .flag{background:#1a1f2e;border:1px solid #2d3748;color:#94a3b8;font-size:11px;padding:2px 7px;border-radius:4px}
+.tier-grid{display:grid;grid-template-columns:repeat(auto-fill,minmax(250px,1fr));gap:12px;padding:16px}
+.tier-card{background:#111827;border:1px solid #2d3748;border-radius:10px;padding:14px}
+.tier-card .tier-name{font-weight:700;font-size:14px;color:#fff}
+.tier-card .tier-range{font-family:monospace;font-size:12px;color:#a78bfa;margin:3px 0}
+.tier-card .tier-desc{color:#64748b;font-size:11px;margin:6px 0}
+.tier-card .tier-flags{display:flex;flex-wrap:wrap;gap:4px;margin-top:8px}
+.tier-card .flag{background:#1a1f2e;border:1px solid #2d3748;color:#94a3b8;font-size:10px;padding:1px 6px;border-radius:4px}
 .tier-card .flag.on{background:#1a3a2a;border-color:#065f46;color:#34d399}
-/* TPA champs */
-.tpa-table td:first-child{font-family:monospace;color:#a78bfa;font-weight:700;width:60px}
-.tpa-table td:nth-child(2){color:#64748b;font-size:11px;width:220px}
-.tpa-table td:nth-child(3){font-family:monospace;color:#e2e8f0;word-break:break-all}
-/* Historique */
-.hist-filters{display:flex;gap:10px;padding:14px 20px;border-bottom:1px solid #2d3748;flex-wrap:wrap;align-items:flex-end}
-.hist-filters .filter-group{display:flex;flex-direction:column;gap:4px;min-width:120px}
-.hist-filters label{margin-bottom:0}
-.detail-panel{background:#0a0d14;border:1px solid #2d3748;border-radius:8px;padding:16px;margin:14px 20px;display:none}
-.detail-panel.open{display:block}
-.detail-grid{display:grid;grid-template-columns:repeat(auto-fill,minmax(200px,1fr));gap:12px;margin-bottom:14px}
-.detail-field .df-label{color:#64748b;font-size:11px;text-transform:uppercase;letter-spacing:.3px}
-.detail-field .df-value{color:#e2e8f0;font-family:monospace;font-size:12px;margin-top:3px;word-break:break-all}
-.pagination{display:flex;gap:8px;align-items:center;padding:12px 20px;border-top:1px solid #2d3748}
-.page-btn{background:#1a1f2e;border:1px solid #2d3748;color:#94a3b8;padding:4px 12px;border-radius:6px;cursor:pointer;font-size:12px}
+/* CB cards */
+.cb-grid{display:grid;grid-template-columns:repeat(auto-fill,minmax(280px,1fr));gap:12px;padding:16px}
+.cb-card{background:#111827;border:1px solid #2d3748;border-radius:10px;padding:14px}
+.cb-card h3{font-size:13px;font-weight:700;color:#fbbf24;margin-bottom:8px;display:flex;align-items:center;gap:6px}
+.cb-param{display:flex;justify-content:space-between;padding:4px 0;border-bottom:1px solid #1a2133;font-size:12px}
+.cb-param:last-child{border-bottom:none}
+.cb-param .k{color:#64748b}
+.cb-param .v{color:#e2e8f0;font-family:monospace;font-weight:600;text-align:right;max-width:55%}
+.cb-param .v.ok{color:#34d399}.cb-param .v.warn{color:#f59e0b}.cb-param .v.crit{color:#f87171}
+/* AID table */
+.aid-tag{background:#1a1a3a;color:#a78bfa;font-family:monospace;font-size:11px;padding:1px 6px;border-radius:4px}
+/* Hist */
+.hist-filters{display:flex;gap:8px;padding:12px 18px;border-bottom:1px solid #2d3748;flex-wrap:wrap;align-items:flex-end}
+.filter-group{display:flex;flex-direction:column;gap:3px;min-width:100px}
+.filter-group label{margin-bottom:0}
+.pagination{display:flex;gap:6px;align-items:center;padding:10px 18px;border-top:1px solid #2d3748}
+.page-btn{background:#1a1f2e;border:1px solid #2d3748;color:#94a3b8;padding:3px 11px;border-radius:5px;cursor:pointer;font-size:11px}
 .page-btn:hover{border-color:#667eea;color:#a78bfa}
 .page-btn:disabled{opacity:.4;cursor:not-allowed}
 /* Card grid */
-.card-grid{display:grid;grid-template-columns:repeat(auto-fill,minmax(260px,1fr));gap:14px;padding:20px}
-.card-item{background:linear-gradient(135deg,#1e2a3a,#1a2030);border:1px solid #2d3748;border-radius:10px;padding:15px}
-.card-item .pan{font-family:monospace;font-size:13px;color:#a78bfa;letter-spacing:2px}
-.card-item .name{color:#e2e8f0;font-weight:600;margin:7px 0 3px}
-.card-item .details{color:#64748b;font-size:12px}
-.card-item .balance{color:#34d399;font-size:17px;font-weight:700;margin-top:10px}
-/* API list */
-.ep{display:flex;align-items:flex-start;gap:10px;padding:12px 20px;border-bottom:1px solid #1a2133}
+.card-grid{display:grid;grid-template-columns:repeat(auto-fill,minmax(240px,1fr));gap:12px;padding:16px}
+.card-item{background:linear-gradient(135deg,#1e2a3a,#1a2030);border:1px solid #2d3748;border-radius:10px;padding:13px}
+.card-item .pan{font-family:monospace;font-size:12px;color:#a78bfa;letter-spacing:2px}
+.card-item .name{color:#e2e8f0;font-weight:600;margin:5px 0 2px;font-size:13px}
+.card-item .details{color:#64748b;font-size:11px}
+.card-item .balance{color:#34d399;font-size:16px;font-weight:700;margin-top:8px}
+.card-actions{display:flex;gap:6px;margin-top:8px}
+/* API */
+.ep{display:flex;align-items:flex-start;gap:8px;padding:10px 18px;border-bottom:1px solid #1a2133}
 .ep:last-child{border-bottom:none}
-.method{font-size:11px;font-weight:700;padding:3px 7px;border-radius:5px;min-width:50px;text-align:center;flex-shrink:0;margin-top:1px}
+.method{font-size:10px;font-weight:700;padding:2px 6px;border-radius:4px;min-width:48px;text-align:center;flex-shrink:0;margin-top:1px}
 .method.POST{background:#1a3a2a;color:#34d399;border:1px solid #065f46}
 .method.GET{background:#1a2a3a;color:#60a5fa;border:1px solid #1e40af}
 .method.DELETE{background:#3a1a1a;color:#f87171;border:1px solid #991b1b}
 .method.PUT{background:#2a2a1a;color:#fbbf24;border:1px solid #92400e}
-.ep-path{font-family:monospace;color:#a78bfa;font-size:13px;font-weight:600}
-.ep-desc{color:#64748b;font-size:12px;margin-top:2px}
-.section-hdr{padding:14px 20px;border-bottom:1px solid #2d3748;display:flex;align-items:center;justify-content:space-between}
-.section-hdr h2{font-size:14px;font-weight:600;color:#fff}
+.ep-path{font-family:monospace;color:#a78bfa;font-size:12px;font-weight:600}
+.ep-desc{color:#64748b;font-size:11px;margin-top:1px}
+.section-hdr{padding:12px 18px;border-bottom:1px solid #2d3748;display:flex;align-items:center;justify-content:space-between;flex-wrap:wrap;gap:8px}
+.section-hdr h2{font-size:13px;font-weight:600;color:#fff}
+.cb-eval-box{background:#0a0d14;border:1px solid #fbbf24;border-radius:8px;padding:12px;font-family:monospace;font-size:11px;color:#fbbf24;white-space:pre-wrap;word-break:break-all;max-height:300px;overflow-y:auto;display:none}
 </style>
 </head>
 <body>
 <div class="header">
   <div class="logo">💳</div>
   <div>
-    <h1>Serveur d'Autorisation EMV</h1>
-    <p>ISO 8583 · EMV 4.3 · ARQC/ARPC · Gestion par montant · Format TPA</p>
+    <h1>Serveur d'Autorisation EMV — GIE CB</h1>
+    <p>ISO 8583 · EMV 4.3 · ARQC/ARPC · GIE CB · Gestion par montant · Format TPA</p>
   </div>
   <div class="online-badge">En ligne</div>
 </div>
@@ -154,7 +165,7 @@ tr:hover td{background:#111827}
     <div class="stat red"><div class="lbl">Refusées</div><div class="val" id="sDeclined">–</div><div class="sub">refus</div></div>
     <div class="stat purple"><div class="lbl">Montant approuvé</div><div class="val" id="sAmount">–</div><div class="sub">total cumulé</div></div>
     <div class="stat teal"><div class="lbl">Chemin ONLINE</div><div class="val" id="sOnline">–</div><div class="sub">autorisations</div></div>
-    <div class="stat orange"><div class="lbl">Chemin OFFLINE</div><div class="val" id="sOffline">–</div><div class="sub">autorisations</div></div>
+    <div class="stat cb"><div class="lbl">Schémas CB</div><div class="val" id="sCB">–</div><div class="sub" id="sCBDetail">—</div></div>
   </div>
 
   <div class="section">
@@ -162,7 +173,8 @@ tr:hover td{background:#111827}
       <button class="tab active" onclick="showTab('demo',this)">Démo</button>
       <button class="tab" onclick="showTab('history',this)">Historique</button>
       <button class="tab" onclick="showTab('tpa',this)">Réponse TPA</button>
-      <button class="tab" onclick="showTab('tiers',this)">Tranches montant</button>
+      <button class="tab" onclick="showTab('tiers',this)">Tranches</button>
+      <button class="tab" onclick="showTab('giecb',this)">GIE CB</button>
       <button class="tab" onclick="showTab('cards',this)">Cartes</button>
       <button class="tab" onclick="showTab('api',this)">API</button>
     </div>
@@ -174,9 +186,10 @@ tr:hover td{background:#111827}
           <div class="form-group">
             <label>Carte (PAN)</label>
             <select id="panSelect" onchange="fillCard()">
-              <option value="4111111111111111">4111 1111 1111 1111 — JEAN DUPONT (Actif)</option>
-              <option value="5500000000000004">5500 0000 0000 0004 — MARIE MARTIN (Actif)</option>
-              <option value="4000000000000002">4000 0000 0000 0002 — AHMED BENALI (Actif)</option>
+              <option value="4111111111111111">4111 1111 1111 1111 — JEAN DUPONT (Visa CB)</option>
+              <option value="5500000000000004">5500 0000 0000 0004 — MARIE MARTIN (MC CB)</option>
+              <option value="4000000000000002">4000 0000 0000 0002 — AHMED BENALI (Visa CB)</option>
+              <option value="4970100000000154">4970 1000 0000 0154 — CB NATIVE TEST (CB)</option>
               <option value="4000000000000036">4000 0000 0000 0036 — Provision insuffisante</option>
               <option value="4000000000000028">4000 0000 0000 0028 — Carte bloquée</option>
               <option value="4000000000000010">4000 0000 0000 0010 — Carte expirée</option>
@@ -203,11 +216,35 @@ tr:hover td{background:#111827}
             <label>Type de transaction</label>
             <select id="txnType">
               <option value="00">00 — Achat</option>
-              <option value="01">01 — Avance liquidités</option>
+              <option value="01">01 — Avance liquidités (DAB)</option>
               <option value="09">09 — Achat + cashback</option>
               <option value="20">20 — Remboursement</option>
               <option value="22">22 — Consultation solde</option>
             </select>
+          </div>
+          <div style="display:grid;grid-template-columns:1fr 1fr;gap:8px">
+            <div class="form-group">
+              <label>Mode saisie POS</label>
+              <select id="posMode">
+                <option value="051">051 — Puce contact</option>
+                <option value="071">071 — Sans contact NFC</option>
+                <option value="011">011 — Bande magnétique</option>
+                <option value="010">010 — Manuel (MOTO)</option>
+              </select>
+            </div>
+            <div class="form-group">
+              <label>MCC commerçant</label>
+              <select id="mcc">
+                <option value="">— Défaut —</option>
+                <option value="5411">5411 — Supermarché</option>
+                <option value="5541">5541 — Station service</option>
+                <option value="5912">5912 — Pharmacie</option>
+                <option value="5812">5812 — Restaurant</option>
+                <option value="7011">7011 — Hôtel</option>
+                <option value="4111">4111 — Transport</option>
+                <option value="4784">4784 — Péage</option>
+              </select>
+            </div>
           </div>
           <div class="form-group">
             <label>Terminal ID</label>
@@ -221,16 +258,16 @@ tr:hover td{background:#111827}
         </div>
         <div>
           <div class="form-group">
-            <label>Tranche détectée</label>
-            <div id="tierBox" style="background:#111827;border:1px solid #2d3748;border-radius:7px;padding:10px;font-size:12px;color:#64748b;min-height:44px">—</div>
+            <label>Tranche + règles GIE CB détectées</label>
+            <div id="tierBox" style="background:#111827;border:1px solid #2d3748;border-radius:7px;padding:9px;font-size:11px;color:#64748b;min-height:44px">—</div>
           </div>
           <div class="form-group">
             <label>Réponse serveur (JSON)</label>
             <div class="result-box" id="resultBox">En attente…</div>
           </div>
-          <div class="form-group" style="margin-top:12px">
-            <label>Réponse TPA (champs structurés)</label>
-            <div class="result-box" id="tpaBox" style="min-height:120px">—</div>
+          <div class="form-group" style="margin-top:10px">
+            <label>Réponse TPA — champs F00–CBA</label>
+            <div class="result-box" id="tpaBox" style="min-height:100px">—</div>
           </div>
         </div>
       </div>
@@ -239,69 +276,53 @@ tr:hover td{background:#111827}
     <!-- ═══ HISTORIQUE ═══ -->
     <div id="tab-history" class="tab-content">
       <div class="hist-filters">
-        <div class="filter-group">
-          <label>Statut</label>
+        <div class="filter-group"><label>Statut</label>
           <select id="fStatus" onchange="loadHistory()">
-            <option value="">Tous</option>
-            <option value="APPROVED">Approuvé</option>
-            <option value="DECLINED">Refusé</option>
-            <option value="ERROR">Erreur</option>
-          </select>
-        </div>
-        <div class="filter-group">
-          <label>Tranche</label>
+            <option value="">Tous</option><option value="APPROVED">Approuvé</option>
+            <option value="DECLINED">Refusé</option><option value="ERROR">Erreur</option>
+          </select></div>
+        <div class="filter-group"><label>Tranche</label>
           <select id="fTier" onchange="loadHistory()">
-            <option value="">Toutes</option>
-            <option value="MICRO">MICRO</option>
-            <option value="SMALL">SMALL</option>
-            <option value="STANDARD">STANDARD</option>
-            <option value="HIGH">HIGH</option>
-            <option value="VERY_HIGH">VERY_HIGH</option>
+            <option value="">Toutes</option><option value="MICRO">MICRO</option>
+            <option value="SMALL">SMALL</option><option value="STANDARD">STANDARD</option>
+            <option value="HIGH">HIGH</option><option value="VERY_HIGH">VERY_HIGH</option>
             <option value="CRITICAL">CRITICAL</option>
-          </select>
-        </div>
-        <div class="filter-group" style="min-width:80px">
-          <label>Par page</label>
+          </select></div>
+        <div class="filter-group" style="min-width:70px"><label>/ page</label>
           <select id="fLimit" onchange="loadHistory()">
-            <option value="20">20</option>
-            <option value="50">50</option>
-            <option value="100">100</option>
-          </select>
-        </div>
+            <option value="20">20</option><option value="50">50</option><option value="100">100</option>
+          </select></div>
         <button class="btn-sm" onclick="loadHistory()" style="align-self:flex-end">↻ Actualiser</button>
         <button class="btn-sm" onclick="exportHistory()" style="align-self:flex-end">⬇ Export JSON</button>
       </div>
-
-      <div id="histDetailPanel" class="detail-panel"></div>
-
       <div style="overflow-x:auto">
         <table>
           <thead><tr>
             <th></th><th>RRN</th><th>Carte</th><th>Montant</th>
-            <th>Tranche</th><th>Risque</th><th>Chemin</th>
-            <th>Statut</th><th>Code</th><th>Auth</th><th>Date/Heure</th>
+            <th>Tranche</th><th>Risque</th><th>CB</th><th>SCA</th>
+            <th>Chemin</th><th>Statut</th><th>Code</th><th>Date/Heure</th>
           </tr></thead>
           <tbody id="histTableBody">
-            <tr><td colspan="11" style="text-align:center;color:#64748b;padding:30px">Cliquez Actualiser</td></tr>
+            <tr><td colspan="12" style="text-align:center;color:#64748b;padding:24px">Cliquez Actualiser</td></tr>
           </tbody>
         </table>
       </div>
       <div class="pagination">
         <button class="page-btn" id="prevBtn" onclick="histPage(-1)" disabled>← Préc.</button>
-        <span id="pageInfo" style="color:#64748b;font-size:12px">Page 1</span>
+        <span id="pageInfo" style="color:#64748b;font-size:11px">Page 1</span>
         <button class="page-btn" id="nextBtn" onclick="histPage(1)">Suiv. →</button>
-        <span id="histTotal" style="color:#64748b;font-size:12px;margin-left:auto"></span>
+        <span id="histTotal" style="color:#64748b;font-size:11px;margin-left:auto"></span>
       </div>
     </div>
 
     <!-- ═══ RÉPONSE TPA ═══ -->
     <div id="tab-tpa" class="tab-content">
       <div class="section-hdr">
-        <h2>Découpage TPA — Dernière transaction</h2>
+        <h2>Découpage TPA — Dernière transaction (champs F00–CBA)</h2>
         <button class="btn-sm" onclick="loadLastTPA()">↻ Rafraîchir</button>
       </div>
-      <div id="tpaFullPanel" style="padding:16px">
-        <div style="color:#64748b;font-size:13px">Effectuez une autorisation pour voir le découpage TPA.</div>
+      <div id="tpaFullPanel" style="padding:14px">
+        <div style="color:#64748b;font-size:12px">Effectuez une autorisation pour voir le découpage TPA complet.</div>
       </div>
     </div>
 
@@ -311,29 +332,85 @@ tr:hover td{background:#111827}
         <h2>Tranches de montant — Règles d'autorisation</h2>
         <button class="btn-sm" onclick="toggleAddTier()">+ Ajouter tranche</button>
       </div>
-      <div id="addTierForm" style="display:none;padding:16px;border-bottom:1px solid #2d3748;background:#0a0d14">
-        <div style="display:grid;grid-template-columns:repeat(auto-fill,minmax(200px,1fr));gap:12px">
-          <div class="form-group"><label>Nom (ex: PREMIUM)</label><input type="text" id="tName" placeholder="CUSTOM"></div>
+      <div id="addTierForm" style="display:none;padding:14px;border-bottom:1px solid #2d3748;background:#0a0d14">
+        <div style="display:grid;grid-template-columns:repeat(auto-fill,minmax(190px,1fr));gap:10px">
+          <div class="form-group"><label>Nom</label><input type="text" id="tName" placeholder="CUSTOM"></div>
           <div class="form-group"><label>Label</label><input type="text" id="tLabel" placeholder="Ma tranche"></div>
-          <div class="form-group"><label>Montant min (centimes)</label><input type="number" id="tMin" placeholder="0"></div>
-          <div class="form-group"><label>Montant max (centimes)</label><input type="number" id="tMax" placeholder="100000"></div>
+          <div class="form-group"><label>Min (centimes)</label><input type="number" id="tMin" placeholder="0"></div>
+          <div class="form-group"><label>Max (centimes)</label><input type="number" id="tMax" placeholder="100000"></div>
           <div class="form-group"><label>Niveau risque</label>
-            <select id="tRisk"><option>LOW</option><option>MEDIUM</option><option>HIGH</option><option>VERY_HIGH</option><option>CRITICAL</option></select>
-          </div>
-          <div class="form-group"><label>Limite journalière (nombre)</label><input type="number" id="tDailyCount" placeholder="vide = illimité"></div>
+            <select id="tRisk"><option>LOW</option><option>MEDIUM</option><option>HIGH</option><option>VERY_HIGH</option><option>CRITICAL</option></select></div>
+          <div class="form-group"><label>Limite/jour (nb)</label><input type="number" id="tDailyCount" placeholder="illimité"></div>
           <div class="form-group"><label>Options</label>
-            <label style="display:flex;gap:6px;align-items:center;margin-top:6px"><input type="checkbox" id="tOnline" checked> Requiert online</label>
-            <label style="display:flex;gap:6px;align-items:center;margin-top:4px"><input type="checkbox" id="tArqc" checked> Requiert ARQC</label>
-            <label style="display:flex;gap:6px;align-items:center;margin-top:4px"><input type="checkbox" id="tOffline"> Auto-approve offline</label>
-          </div>
+            <label style="display:flex;gap:5px;align-items:center;margin-top:4px"><input type="checkbox" id="tOnline" checked> Online</label>
+            <label style="display:flex;gap:5px;align-items:center;margin-top:3px"><input type="checkbox" id="tArqc" checked> ARQC</label>
+            <label style="display:flex;gap:5px;align-items:center;margin-top:3px"><input type="checkbox" id="tOffline"> Offline OK</label></div>
         </div>
-        <div class="form-group"><label>Description</label><input type="text" id="tDesc" placeholder="Description de la tranche"></div>
-        <div style="display:flex;gap:10px;margin-top:8px">
-          <button class="btn-sm" onclick="addTier()" style="background:#667eea;color:#fff">Créer la tranche</button>
+        <div class="form-group"><label>Description</label><input type="text" id="tDesc" placeholder="Description"></div>
+        <div style="display:flex;gap:8px;margin-top:6px">
+          <button class="btn-sm" onclick="addTier()" style="background:#667eea;color:#fff">Créer</button>
           <button class="btn-sm" onclick="toggleAddTier()">Annuler</button>
         </div>
       </div>
       <div class="tier-grid" id="tierGrid">Chargement…</div>
+    </div>
+
+    <!-- ═══ GIE CB ═══ -->
+    <div id="tab-giecb" class="tab-content">
+      <div class="section-hdr">
+        <h2>Règles GIE CB — Paramètres d'autorisation</h2>
+        <button class="btn-sm" onclick="loadCBRules()">↻ Actualiser</button>
+      </div>
+
+      <!-- Évaluateur CB rapide -->
+      <div style="padding:14px;border-bottom:1px solid #2d3748;background:#0a0d14">
+        <div style="font-size:12px;color:#fbbf24;font-weight:600;margin-bottom:10px">⚡ Évaluateur de règles CB en temps réel</div>
+        <div style="display:grid;grid-template-columns:repeat(auto-fill,minmax(160px,1fr));gap:8px;margin-bottom:8px">
+          <div class="form-group"><label>PAN</label><input type="text" id="cbPan" value="4111111111111111" placeholder="PAN"></div>
+          <div class="form-group"><label>Montant (centimes)</label><input type="number" id="cbAmt" value="5000"></div>
+          <div class="form-group"><label>MCC</label>
+            <select id="cbMcc"><option value="">Défaut</option><option value="5411">5411 Supermarché</option>
+              <option value="5541">5541 Station service</option><option value="5912">5912 Pharmacie</option>
+              <option value="5812">5812 Restaurant</option><option value="7011">7011 Hôtel</option>
+            </select></div>
+          <div class="form-group"><label>Mode</label>
+            <select id="cbMode"><option value="051">Contact</option><option value="071">Sans contact NFC</option><option value="011">Bande magnétique</option></select></div>
+          <div class="form-group"><label>Type</label>
+            <select id="cbType"><option value="00">Achat</option><option value="01">DAB</option><option value="20">Remboursement</option></select></div>
+        </div>
+        <button class="btn-sm" onclick="evalCB()" style="background:#b45309;color:#fef3c7">Évaluer les règles CB →</button>
+        <div class="cb-eval-box" id="cbEvalBox" style="margin-top:10px"></div>
+      </div>
+
+      <div class="cb-grid" id="cbGrid">Chargement…</div>
+
+      <!-- Table AIDs -->
+      <div style="padding:14px;border-top:1px solid #2d3748">
+        <div style="font-size:12px;font-weight:600;color:#fbbf24;margin-bottom:10px">AIDs CB reconnus</div>
+        <div style="overflow-x:auto">
+          <table id="aidTable">
+            <thead><tr><th>AID</th><th>Nom application</th><th>Schéma</th><th>Brand</th><th>Contactless</th></tr></thead>
+            <tbody id="aidBody"></tbody>
+          </table>
+        </div>
+      </div>
+
+      <!-- Table floor limits MCC -->
+      <div style="padding:14px;border-top:1px solid #2d3748">
+        <div style="font-size:12px;font-weight:600;color:#fbbf24;margin-bottom:10px">Floor Limits CB par MCC</div>
+        <div style="overflow-x:auto">
+          <table id="floorTable">
+            <thead><tr><th>MCC</th><th>Catégorie</th><th>Floor Limit</th><th>Remarque</th></tr></thead>
+            <tbody id="floorBody"></tbody>
+          </table>
+        </div>
+      </div>
+
+      <!-- Codes réponse CB -->
+      <div style="padding:14px;border-top:1px solid #2d3748">
+        <div style="font-size:12px;font-weight:600;color:#fbbf24;margin-bottom:10px">Codes réponse GIE CB</div>
+        <div style="display:grid;grid-template-columns:repeat(auto-fill,minmax(280px,1fr));gap:6px" id="cbCodesGrid"></div>
+      </div>
     </div>
 
     <!-- ═══ CARTES ═══ -->
@@ -342,252 +419,237 @@ tr:hover td{background:#111827}
         <h2>Cartes de test</h2>
         <button class="btn-sm" onclick="loadCards()">↻ Actualiser</button>
       </div>
-      <div class="card-grid" id="cardGrid"><div style="color:#64748b;padding:20px">Chargement…</div></div>
+      <div class="card-grid" id="cardGrid"><div style="color:#64748b;padding:16px">Chargement…</div></div>
     </div>
 
     <!-- ═══ API ═══ -->
     <div id="tab-api" class="tab-content">
-      <div class="ep"><span class="method POST">POST</span><div><div class="ep-path">/api/v1/authorize</div><div class="ep-desc">Autorisation EMV — vérifie tranche, carte, ARQC. Retourne réponse TPA complète.</div></div></div>
+      <div class="ep"><span class="method POST">POST</span><div><div class="ep-path">/api/v1/authorize</div><div class="ep-desc">Autorisation EMV (tranche + règles GIE CB + TPA)</div></div></div>
       <div class="ep"><span class="method POST">POST</span><div><div class="ep-path">/api/v1/authorize/iso8583</div><div class="ep-desc">Autorisation via message ISO 8583 complet</div></div></div>
-      <div class="ep"><span class="method GET">GET</span><div><div class="ep-path">/api/v1/transactions</div><div class="ep-desc">Historique paginé avec filtres ?status=&tier=&limit=&offset=</div></div></div>
-      <div class="ep"><span class="method GET">GET</span><div><div class="ep-path">/api/v1/transactions/&lt;id&gt;</div><div class="ep-desc">Détail complet d'une transaction avec champs TPA</div></div></div>
-      <div class="ep"><span class="method GET">GET</span><div><div class="ep-path">/api/v1/transactions/&lt;id&gt;/tpa</div><div class="ep-desc">Réponse TPA découpée en champs pour une transaction</div></div></div>
-      <div class="ep"><span class="method GET">GET</span><div><div class="ep-path">/api/v1/transactions/pan/&lt;pan&gt;</div><div class="ep-desc">Historique d'une carte par PAN</div></div></div>
-      <div class="ep"><span class="method GET">GET</span><div><div class="ep-path">/api/v1/amount-tiers</div><div class="ep-desc">Liste toutes les tranches de montant configurées</div></div></div>
+      <div class="ep"><span class="method GET">GET</span><div><div class="ep-path">/api/v1/transactions</div><div class="ep-desc">Historique paginé — ?status=&tier=&limit=&offset=</div></div></div>
+      <div class="ep"><span class="method GET">GET</span><div><div class="ep-path">/api/v1/transactions/&lt;id&gt;</div><div class="ep-desc">Détail complet + champs TPA CB d'une transaction</div></div></div>
+      <div class="ep"><span class="method GET">GET</span><div><div class="ep-path">/api/v1/transactions/&lt;id&gt;/tpa</div><div class="ep-desc">Réponse TPA découpée (F00–CBA)</div></div></div>
+      <div class="ep"><span class="method GET">GET</span><div><div class="ep-path">/api/v1/amount-tiers</div><div class="ep-desc">Liste toutes les tranches de montant</div></div></div>
       <div class="ep"><span class="method POST">POST</span><div><div class="ep-path">/api/v1/amount-tiers</div><div class="ep-desc">Créer une tranche personnalisée</div></div></div>
       <div class="ep"><span class="method DELETE">DELETE</span><div><div class="ep-path">/api/v1/amount-tiers/&lt;name&gt;</div><div class="ep-desc">Supprimer une tranche personnalisée</div></div></div>
-      <div class="ep"><span class="method GET">GET</span><div><div class="ep-path">/api/v1/amount-tiers/evaluate?amount=5000</div><div class="ep-desc">Évaluer la tranche pour un montant donné</div></div></div>
-      <div class="ep"><span class="method GET">GET</span><div><div class="ep-path">/api/v1/tpa/fields</div><div class="ep-desc">Définitions de tous les champs TPA</div></div></div>
-      <div class="ep"><span class="method GET">GET</span><div><div class="ep-path">/api/v1/cards</div><div class="ep-desc">Liste des cartes (PAN masqué)</div></div></div>
+      <div class="ep"><span class="method GET">GET</span><div><div class="ep-path">/api/v1/amount-tiers/evaluate?amount=5000</div><div class="ep-desc">Évaluer la tranche pour un montant</div></div></div>
+      <div class="ep"><span class="method GET">GET</span><div><div class="ep-path">/api/v1/giecb/rules</div><div class="ep-desc">Tous les paramètres GIE CB (CAP, TAP, contactless, SCA)</div></div></div>
+      <div class="ep"><span class="method POST">POST</span><div><div class="ep-path">/api/v1/giecb/evaluate</div><div class="ep-desc">Évaluer les règles CB pour un contexte de transaction</div></div></div>
+      <div class="ep"><span class="method GET">GET</span><div><div class="ep-path">/api/v1/giecb/aids</div><div class="ep-desc">Liste tous les AIDs CB connus</div></div></div>
+      <div class="ep"><span class="method GET">GET</span><div><div class="ep-path">/api/v1/giecb/floor-limits</div><div class="ep-desc">Floor limits CB par MCC</div></div></div>
+      <div class="ep"><span class="method GET">GET</span><div><div class="ep-path">/api/v1/giecb/response-codes</div><div class="ep-desc">Codes réponse GIE CB</div></div></div>
+      <div class="ep"><span class="method GET">GET</span><div><div class="ep-path">/api/v1/tpa/fields</div><div class="ep-desc">Définitions de tous les champs TPA (F00–CBA)</div></div></div>
+      <div class="ep"><span class="method GET">GET</span><div><div class="ep-path">/api/v1/cards</div><div class="ep-desc">Liste des cartes (PAN masqué, infos CB)</div></div></div>
       <div class="ep"><span class="method POST">POST</span><div><div class="ep-path">/api/v1/cards</div><div class="ep-desc">Créer une nouvelle carte</div></div></div>
-      <div class="ep"><span class="method POST">POST</span><div><div class="ep-path">/api/v1/cards/&lt;pan&gt;/block</div><div class="ep-desc">Bloquer une carte</div></div></div>
+      <div class="ep"><span class="method POST">POST</span><div><div class="ep-path">/api/v1/cards/&lt;pan&gt;/block</div><div class="ep-desc">Bloquer une carte (body: {"reason":"…"})</div></div></div>
+      <div class="ep"><span class="method POST">POST</span><div><div class="ep-path">/api/v1/cards/&lt;pan&gt;/unblock</div><div class="ep-desc">Débloquer une carte BLOCKED ou RESTRICTED</div></div></div>
       <div class="ep"><span class="method POST">POST</span><div><div class="ep-path">/api/v1/tlv/parse</div><div class="ep-desc">Décodage BER-TLV du champ 55</div></div></div>
-      <div class="ep"><span class="method GET">GET</span><div><div class="ep-path">/api/v1/stats</div><div class="ep-desc">Statistiques globales par tranche, chemin, risque</div></div></div>
+      <div class="ep"><span class="method GET">GET</span><div><div class="ep-path">/api/v1/stats</div><div class="ep-desc">Statistiques globales (tranches, chemins, schémas CB)</div></div></div>
       <div class="ep"><span class="method GET">GET</span><div><div class="ep-path">/api/v1/health</div><div class="ep-desc">Santé du serveur</div></div></div>
     </div>
   </div>
 </div>
 
 <script>
-let histOffset = 0, histLimit = 20, histTotal = 0;
-let lastTxnId = null;
+let histOffset=0,histLimit=20,histTotal=0,lastTxnId=null;
 
-/* ── Onglets ── */
-function showTab(name, el) {
-  document.querySelectorAll('.tab').forEach(t => t.classList.remove('active'));
-  document.querySelectorAll('.tab-content').forEach(t => t.classList.remove('active'));
-  if(el) el.classList.add('active');
-  document.getElementById('tab-'+name).classList.add('active');
-  if(name==='history') loadHistory();
-  if(name==='tpa') loadLastTPA();
-  if(name==='tiers') loadTiers();
-  if(name==='cards') loadCards();
+function showTab(n,el){
+  document.querySelectorAll('.tab').forEach(t=>t.classList.remove('active'));
+  document.querySelectorAll('.tab-content').forEach(t=>t.classList.remove('active'));
+  if(el)el.classList.add('active');
+  document.getElementById('tab-'+n).classList.add('active');
+  if(n==='history')loadHistory();
+  if(n==='tpa')loadLastTPA();
+  if(n==='tiers')loadTiers();
+  if(n==='giecb')loadCBRules();
+  if(n==='cards')loadCards();
 }
 
-/* ── Carte sélectionnée ── */
 function fillCard(){
   const v=document.getElementById('panSelect').value;
   document.getElementById('customPanGroup').style.display=v==='custom'?'block':'none';
 }
 function getPan(){
   const v=document.getElementById('panSelect').value;
-  return v==='custom'?document.getElementById('customPan').value.replace(/\\s/g,''):v;
+  return v==='custom'?document.getElementById('customPan').value.replace(/\s/g,''):v;
 }
 
 /* ── Évaluation tranche en temps réel ── */
-document.getElementById('amount').addEventListener('input', async function(){
-  const amt = parseInt(this.value)||0;
-  if(!amt) return;
-  try {
-    const r = await fetch('/api/v1/amount-tiers/evaluate?amount='+amt);
-    const d = await r.json();
-    const t = d.tier;
-    const riskCls = {'LOW':'#10b981','MEDIUM':'#f59e0b','HIGH':'#f97316','VERY_HIGH':'#ef4444','CRITICAL':'#dc2626'}[t.risk_level]||'#94a3b8';
-    document.getElementById('tierBox').innerHTML =
-      '<span style="font-weight:700;color:'+riskCls+'">'+t.name+'</span> — '+t.label+
-      ' &nbsp;|&nbsp; <span style="color:#64748b">'+t.description+'</span>'+
-      ' &nbsp;|&nbsp; Risque: <span style="color:'+riskCls+'">'+t.risk_level+'</span>'+
-      (t.require_online?' &nbsp;<span style="color:#60a5fa">ONLINE</span>':' &nbsp;<span style="color:#6ee7b7">OFFLINE</span>')+
-      (t.max_daily_count?(' &nbsp;Limite: <span style="color:#fbbf24">'+t.max_daily_count+'/j</span>'):'');
-  } catch(e){}
+document.getElementById('amount').addEventListener('input',async function(){
+  const amt=parseInt(this.value)||0; if(!amt)return;
+  try{
+    const r=await fetch('/api/v1/amount-tiers/evaluate?amount='+amt);
+    const d=await r.json(); const t=d.tier;
+    const rc={'LOW':'#10b981','MEDIUM':'#f59e0b','HIGH':'#f97316','VERY_HIGH':'#ef4444','CRITICAL':'#dc2626'}[t.risk_level]||'#94a3b8';
+    document.getElementById('tierBox').innerHTML=
+      '<span style="font-weight:700;color:'+rc+'">'+t.name+'</span> — '+t.label+
+      ' | Risque: <span style="color:'+rc+'">'+t.risk_level+'</span>'+
+      (t.require_online?' | <span style="color:#60a5fa">ONLINE</span>':' | <span style="color:#6ee7b7">OFFLINE</span>')+
+      (t.max_daily_count?' | <span style="color:#fbbf24">Max '+t.max_daily_count+'/j</span>':'');
+  }catch(e){}
 });
 
 /* ── Autorisation ── */
-async function sendAuthorization() {
-  const btn = document.getElementById('authBtn');
-  btn.disabled=true; btn.textContent='Traitement…';
-  const payload = {
-    pan: getPan(),
-    amount: parseInt(document.getElementById('amount').value),
-    currency: document.getElementById('currency').value,
-    transaction_type: document.getElementById('txnType').value,
-    terminal_id: document.getElementById('terminalId').value,
-    merchant_id: 'MERCH001', merchant_name: 'BOUTIQUE TEST',
-    field_55: document.getElementById('emvData').value.trim()||null,
-    skip_crypto: !document.getElementById('emvData').value.trim()
+async function sendAuthorization(){
+  const btn=document.getElementById('authBtn');
+  btn.disabled=true;btn.textContent='Traitement…';
+  const payload={
+    pan:getPan(),amount:parseInt(document.getElementById('amount').value),
+    currency:document.getElementById('currency').value,
+    transaction_type:document.getElementById('txnType').value,
+    terminal_id:document.getElementById('terminalId').value,
+    pos_entry_mode:document.getElementById('posMode').value,
+    mcc:document.getElementById('mcc').value||null,
+    is_contactless:document.getElementById('posMode').value==='071',
+    merchant_id:'MERCH001',merchant_name:'BOUTIQUE TEST',
+    field_55:document.getElementById('emvData').value.trim()||null,
+    skip_crypto:!document.getElementById('emvData').value.trim()
   };
-  try {
-    const resp = await fetch('/api/v1/authorize', {
-      method:'POST', headers:{'Content-Type':'application/json'}, body:JSON.stringify(payload)
-    });
-    const data = await resp.json();
-    const box = document.getElementById('resultBox');
-    const display = {...data}; delete display.tpa_response;
-    box.textContent = JSON.stringify(display, null, 2);
-    box.className = 'result-box '+(data.approved?'approved':'declined');
-    if(data.tpa_response) {
-      const tpaBox = document.getElementById('tpaBox');
-      tpaBox.textContent = formatTPA(data.tpa_response);
-      tpaBox.className = 'result-box';
+  try{
+    const resp=await fetch('/api/v1/authorize',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify(payload)});
+    const data=await resp.json();
+    const box=document.getElementById('resultBox');
+    const disp={...data};delete disp.tpa_response;
+    box.textContent=JSON.stringify(disp,null,2);
+    box.className='result-box '+(data.approved?'approved':'declined');
+    if(data.tpa_response){
+      document.getElementById('tpaBox').textContent=formatTPA(data.tpa_response);
     }
-    if(data.transaction) { lastTxnId = data.transaction.id; }
+    if(data.transaction)lastTxnId=data.transaction.id;
     loadStats();
-  } catch(e) {
+  }catch(e){
     document.getElementById('resultBox').textContent='Erreur: '+e.message;
     document.getElementById('resultBox').className='result-box error';
   }
-  btn.disabled=false; btn.textContent="Envoyer la demande d\\'autorisation →";
+  btn.disabled=false;btn.textContent="Envoyer la demande d'autorisation →";
 }
 
-function formatTPA(tpa) {
-  const lines = ['┌──────┬────────────────────────────────┬────────────────────────┐',
-                 '│ Chmp │ Nom                            │ Valeur                 │',
-                 '├──────┼────────────────────────────────┼────────────────────────┤'];
-  for(const [k,v] of Object.entries(tpa)) {
-    const name = (v.name||k).slice(0,30).padEnd(30);
-    let val = (v.value||'');
-    if(Array.isArray(val)) val=val.join('; ');
-    val = String(val).slice(0,22).padEnd(22);
+function formatTPA(tpa){
+  const lines=['┌──────┬────────────────────────────┬──────────────────────────┐',
+               '│ Chmp │ Nom                        │ Valeur                   │',
+               '├──────┼────────────────────────────┼──────────────────────────┤'];
+  for(const[k,v]of Object.entries(tpa)){
+    const name=(v.name||k).slice(0,28).padEnd(28);
+    let val=v.value; if(Array.isArray(val))val=val.join('; ');
+    val=String(val||'').slice(0,24).padEnd(24);
     lines.push('│ '+k.padEnd(4)+' │ '+name+' │ '+val+' │');
   }
-  lines.push('└──────┴────────────────────────────────┴────────────────────────┘');
-  return lines.join('\\n');
+  lines.push('└──────┴────────────────────────────┴──────────────────────────┘');
+  return lines.join('\n');
 }
 
 /* ── Stats ── */
-async function loadStats() {
-  try {
-    const r=await fetch('/api/v1/stats'); const d=await r.json(); const ts=d.transaction_stats;
+async function loadStats(){
+  try{
+    const r=await fetch('/api/v1/stats');const d=await r.json();const ts=d.transaction_stats;
     document.getElementById('sTotal').textContent=ts.total;
     document.getElementById('sApproved').textContent=ts.approved;
     document.getElementById('sDeclined').textContent=ts.declined;
     document.getElementById('sRate').textContent=ts.approval_rate;
     document.getElementById('sAmount').textContent=ts.total_approved_amount_formatted;
     document.getElementById('sOnline').textContent=ts.by_auth_path?.ONLINE||0;
-    document.getElementById('sOffline').textContent=ts.by_auth_path?.OFFLINE||0;
-  } catch(e){}
+    const cb=ts.by_cb_scheme||{};
+    const total=Object.values(cb).reduce((a,b)=>a+b,0);
+    document.getElementById('sCB').textContent=total;
+    document.getElementById('sCBDetail').textContent=Object.entries(cb).map(([k,v])=>k+':'+v).join(' ');
+  }catch(e){}
 }
 
 /* ── Historique ── */
-async function loadHistory() {
-  histOffset=0; await fetchHistory();
-}
-async function histPage(dir) {
-  histOffset=Math.max(0,histOffset+dir*histLimit); await fetchHistory();
-}
-async function fetchHistory() {
+async function loadHistory(){histOffset=0;await fetchHistory();}
+async function histPage(dir){histOffset=Math.max(0,histOffset+dir*histLimit);await fetchHistory();}
+async function fetchHistory(){
   const status=document.getElementById('fStatus').value;
   const tier=document.getElementById('fTier').value;
   histLimit=parseInt(document.getElementById('fLimit').value)||20;
   let url='/api/v1/transactions?limit='+histLimit+'&offset='+histOffset;
-  if(status) url+='&status='+status;
-  if(tier) url+='&tier='+tier;
-  try {
-    const r=await fetch(url); const d=await r.json();
-    histTotal=d.total_filtered||d.count||0;
-    const page=Math.floor(histOffset/histLimit)+1;
-    document.getElementById('pageInfo').textContent='Page '+page;
+  if(status)url+='&status='+status; if(tier)url+='&tier='+tier;
+  try{
+    const r=await fetch(url);const d=await r.json();
+    histTotal=d.total_filtered||0;
+    document.getElementById('pageInfo').textContent='Page '+(Math.floor(histOffset/histLimit)+1);
     document.getElementById('histTotal').textContent=histTotal+' résultats';
     document.getElementById('prevBtn').disabled=histOffset===0;
     document.getElementById('nextBtn').disabled=histOffset+histLimit>=histTotal;
     const tbody=document.getElementById('histTableBody');
-    if(!d.transactions||!d.transactions.length){
-      tbody.innerHTML='<tr><td colspan="11" style="text-align:center;color:#64748b;padding:24px">Aucune transaction</td></tr>';
-      return;
+    if(!d.transactions?.length){
+      tbody.innerHTML='<tr><td colspan="12" style="text-align:center;color:#64748b;padding:20px">Aucune transaction</td></tr>';return;
     }
-    const riskCls={'LOW':'#10b981','MEDIUM':'#f59e0b','HIGH':'#f97316','VERY_HIGH':'#ef4444','CRITICAL':'#dc2626'};
-    tbody.innerHTML=d.transactions.map((t,i)=>`
-      <tr style="cursor:pointer" onclick="toggleDetail('${t.id}',${i})">
-        <td style="color:#64748b;font-size:11px">▶</td>
-        <td style="font-family:monospace;font-size:11px;color:#94a3b8">${t.rrn||'—'}</td>
-        <td style="font-family:monospace;color:#a78bfa">${t.pan}</td>
+    const rc={'LOW':'#10b981','MEDIUM':'#f59e0b','HIGH':'#f97316','VERY_HIGH':'#ef4444','CRITICAL':'#dc2626'};
+    tbody.innerHTML=d.transactions.map(t=>`
+      <tr style="cursor:pointer" onclick="toggleDetail('${t.id}')">
+        <td style="color:#64748b;font-size:10px">▶</td>
+        <td style="font-family:monospace;font-size:10px;color:#94a3b8">${t.rrn||'—'}</td>
+        <td style="font-family:monospace;color:#a78bfa;font-size:11px">${t.pan}</td>
         <td style="font-weight:600;color:#e2e8f0">${t.amount_formatted} ${t.currency}</td>
-        <td><span style="font-family:monospace;font-size:11px;color:#c4b5fd">${t.amount_tier||'—'}</span></td>
+        <td style="font-family:monospace;font-size:10px;color:#c4b5fd">${t.amount_tier||'—'}</td>
         <td><span class="badge ${t.risk_level||''}">${t.risk_level||'—'}</span></td>
+        <td style="font-size:11px;color:#fbbf24">${t.cb_brand||'—'}</td>
+        <td style="font-size:10px;color:#94a3b8">${t.cb_sca_exemption||'—'}</td>
         <td><span class="badge ${t.auth_path||''}">${t.auth_path||'—'}</span></td>
         <td><span class="badge ${t.status}">${t.status}</span></td>
         <td style="font-family:monospace;font-weight:700;color:${t.response_code==='00'?'#34d399':'#f87171'}">${t.response_code||'—'}</td>
-        <td style="font-family:monospace;color:#60a5fa;font-size:11px">${t.auth_code||'—'}</td>
-        <td style="color:#64748b;font-size:11px">${(t.created_at||'').replace('T',' ').split('.')[0]}</td>
+        <td style="color:#64748b;font-size:10px">${(t.created_at||'').replace('T',' ').split('.')[0]}</td>
       </tr>
       <tr id="detail-${t.id}" style="display:none">
-        <td colspan="11" style="padding:0">
-          <div style="background:#0a0d14;border-top:1px solid #2d3748;padding:14px 20px">
-            <div style="display:grid;grid-template-columns:repeat(auto-fill,minmax(200px,1fr));gap:12px;margin-bottom:12px">
-              ${fieldRow('ID',t.id)}${fieldRow('RRN',t.rrn)}${fieldRow('Commerçant',t.merchant_name)}
-              ${fieldRow('Terminal',t.terminal_id)}${fieldRow('Motif refus',t.decline_reason)}
-              ${fieldRow('ARQC',t.arqc)}${fieldRow('ARPC',t.arpc)}${fieldRow('Tag 91',t.issuer_auth_data)}
-              ${fieldRow('Traité le',t.processed_at?t.processed_at.replace('T',' ').split('.')[0]:null)}
+        <td colspan="12" style="padding:0">
+          <div style="background:#0a0d14;border-top:1px solid #2d3748;padding:12px 18px">
+            <div style="display:grid;grid-template-columns:repeat(auto-fill,minmax(180px,1fr));gap:10px;margin-bottom:10px">
+              ${fr('ID',t.id)}${fr('RRN',t.rrn)}${fr('Commerçant',t.merchant_name)}
+              ${fr('Terminal',t.terminal_id)}${fr('Motif refus',t.decline_reason)}
+              ${fr('CB Schéma',t.cb_scheme)}${fr('CB SCA',t.cb_sca_exemption)}
+              ${fr('Contactless',t.cb_is_contactless?'OUI':'NON')}
+              ${fr('Code CB',t.cb_response_code)}${fr('Motif CB',t.cb_decline_reason)}
+              ${fr('ARQC',t.arqc)}${fr('ARPC',t.arpc)}
             </div>
-            <button class="btn-sm" onclick="loadTPA('${t.id}')">Voir réponse TPA complète</button>
+            <button class="btn-sm" onclick="loadTPA('${t.id}')">Voir TPA complet</button>
           </div>
         </td>
       </tr>
     `).join('');
-  } catch(e){console.error(e)}
+  }catch(e){console.error(e)}
 }
-
-function fieldRow(label,val){
-  if(!val) return '';
-  return '<div><div style="color:#64748b;font-size:10px;text-transform:uppercase">'+label+'</div><div style="font-family:monospace;font-size:11px;color:#e2e8f0;word-break:break-all;margin-top:2px">'+val+'</div></div>';
+function fr(label,val){
+  if(!val)return '';
+  return '<div><div style="color:#64748b;font-size:9px;text-transform:uppercase">'+label+'</div><div style="font-family:monospace;font-size:10px;color:#e2e8f0;word-break:break-all;margin-top:1px">'+val+'</div></div>';
 }
-
-const openDetails={};
-function toggleDetail(id,i){
+const _open={};
+function toggleDetail(id){
   const row=document.getElementById('detail-'+id);
-  if(!row) return;
-  if(openDetails[id]){row.style.display='none';delete openDetails[id];}
-  else{row.style.display='table-row';openDetails[id]=true;}
+  if(!row)return;
+  if(_open[id]){row.style.display='none';delete _open[id];}
+  else{row.style.display='table-row';_open[id]=1;}
 }
 
 /* ── TPA ── */
 async function loadLastTPA(){
-  if(!lastTxnId){
-    const r=await fetch('/api/v1/transactions?limit=1');
-    const d=await r.json();
-    if(d.transactions&&d.transactions.length) lastTxnId=d.transactions[0].id;
-    else return;
-  }
+  if(!lastTxnId){const r=await fetch('/api/v1/transactions?limit=1');const d=await r.json();
+    if(d.transactions?.length)lastTxnId=d.transactions[0].id;else return;}
   await loadTPA(lastTxnId);
 }
 async function loadTPA(id){
   try{
-    const r=await fetch('/api/v1/transactions/'+id+'/tpa');
-    const d=await r.json();
+    const r=await fetch('/api/v1/transactions/'+id+'/tpa');const d=await r.json();
     const panel=document.getElementById('tpaFullPanel');
     const rows=Object.entries(d.tpa_fields||{}).map(([k,v])=>{
-      let val=v.value; if(Array.isArray(val)) val=val.join('; ');
-      return '<tr class="tpa-table"><td>'+k+'</td><td>'+escHtml(v.name||k)+'</td><td>'+escHtml(v.description||'')+'</td><td style="font-family:monospace;font-size:12px;color:#e2e8f0;word-break:break-all">'+escHtml(String(val||''))+'</td></tr>';
+      let val=v.value;if(Array.isArray(val))val=val.join('; ');
+      const isCB=k.startsWith('CB')?'style="background:#1a150a"':'';
+      return '<tr '+isCB+'><td style="font-family:monospace;color:#fbbf24;font-weight:700;width:55px">'+k+'</td><td style="color:#64748b;font-size:10px;width:200px">'+esc(v.name||k)+'</td><td style="color:#94a3b8;font-size:10px;width:240px">'+esc(v.description||'')+'</td><td style="font-family:monospace;font-size:11px;color:#e2e8f0;word-break:break-all">'+esc(String(val||''))+'</td></tr>';
     }).join('');
-    panel.innerHTML='<div style="font-size:12px;color:#64748b;margin-bottom:12px">Transaction: <span style="font-family:monospace;color:#a78bfa">'+id+'</span></div>'+
+    panel.innerHTML='<div style="font-size:11px;color:#64748b;margin-bottom:10px">Transaction: <span style="font-family:monospace;color:#a78bfa">'+id+'</span> — <span style="color:#fbbf24">champs CB en surbrillance</span></div>'+
       '<div style="overflow-x:auto"><table><thead><tr><th>Champ</th><th>Nom</th><th>Description</th><th>Valeur</th></tr></thead><tbody>'+rows+'</tbody></table></div>';
-    document.querySelector('[onclick*="showTab(\\'tpa\\'"]')&&null;
-    const tpaTab=document.querySelector('.tab:nth-child(3)');
-    if(tpaTab&&!tpaTab.classList.contains('active')){
-      showTab('tpa',tpaTab);
-    }
   }catch(e){console.error(e)}
 }
 
 /* ── Tranches ── */
 async function loadTiers(){
   try{
-    const r=await fetch('/api/v1/amount-tiers'); const d=await r.json();
-    const riskColor={'LOW':'#10b981','MEDIUM':'#f59e0b','HIGH':'#f97316','VERY_HIGH':'#ef4444','CRITICAL':'#dc2626'};
+    const r=await fetch('/api/v1/amount-tiers');const d=await r.json();
+    const rc={'LOW':'#10b981','MEDIUM':'#f59e0b','HIGH':'#f97316','VERY_HIGH':'#ef4444','CRITICAL':'#dc2626'};
     document.getElementById('tierGrid').innerHTML=d.tiers.map(t=>`
       <div class="tier-card">
-        <div class="tier-name" style="color:${riskColor[t.risk_level]||'#fff'}">${t.name}</div>
-        <div style="color:#94a3b8;font-size:13px">${t.label}</div>
+        <div class="tier-name" style="color:${rc[t.risk_level]||'#fff'}">${t.name}</div>
+        <div style="color:#94a3b8;font-size:12px">${t.label}</div>
         <div class="tier-range">${fmt(t.min_amount)} — ${t.max_amount>99999999?'∞':fmt(t.max_amount)}</div>
         <div class="tier-desc">${t.description}</div>
         <div class="tier-flags">
@@ -596,74 +658,148 @@ async function loadTiers(){
           <span class="flag ${t.auto_approve_offline?'on':''}">Offline OK</span>
           ${t.max_daily_count?'<span class="flag on">Max '+t.max_daily_count+'/j</span>':''}
         </div>
-        ${t.is_custom?'<button class="btn-sm btn-danger" style="margin-top:10px;width:100%" onclick="deleteTier(\\''+t.name+'\\')">Supprimer</button>':''}
-      </div>
-    `).join('');
+        ${t.is_custom?'<button class="btn-sm danger" style="margin-top:8px;width:100%" onclick="deleteTier(\''+t.name+'\')">Supprimer</button>':''}
+      </div>`).join('');
   }catch(e){}
 }
-function fmt(n){return (n/100).toLocaleString('fr-FR',{minimumFractionDigits:2});}
-function toggleAddTier(){
-  const f=document.getElementById('addTierForm');
-  f.style.display=f.style.display==='none'?'block':'none';
-}
+function fmt(n){return (n/100).toLocaleString('fr-FR',{minimumFractionDigits:2})+'€';}
+function toggleAddTier(){const f=document.getElementById('addTierForm');f.style.display=f.style.display==='none'?'block':'none';}
 async function addTier(){
   const daily=document.getElementById('tDailyCount').value;
-  const payload={
-    name:document.getElementById('tName').value,
-    label:document.getElementById('tLabel').value,
-    min_amount:parseInt(document.getElementById('tMin').value)||0,
-    max_amount:parseInt(document.getElementById('tMax').value)||100000,
-    risk_level:document.getElementById('tRisk').value,
-    require_online:document.getElementById('tOnline').checked,
-    require_arqc:document.getElementById('tArqc').checked,
-    auto_approve_offline:document.getElementById('tOffline').checked,
-    max_daily_count:daily?parseInt(daily):null,
-    description:document.getElementById('tDesc').value,
-    velocity_check:true, require_pin:true, floor_limit:0,
-  };
+  const payload={name:document.getElementById('tName').value,label:document.getElementById('tLabel').value,
+    min_amount:parseInt(document.getElementById('tMin').value)||0,max_amount:parseInt(document.getElementById('tMax').value)||100000,
+    risk_level:document.getElementById('tRisk').value,require_online:document.getElementById('tOnline').checked,
+    require_arqc:document.getElementById('tArqc').checked,auto_approve_offline:document.getElementById('tOffline').checked,
+    max_daily_count:daily?parseInt(daily):null,description:document.getElementById('tDesc').value,
+    velocity_check:true,require_pin:true,floor_limit:0};
   const r=await fetch('/api/v1/amount-tiers',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify(payload)});
-  if(r.ok){toggleAddTier();loadTiers();}
-  else alert('Erreur: '+(await r.json()).error);
+  if(r.ok){toggleAddTier();loadTiers();}else alert('Erreur: '+(await r.json()).error);
 }
 async function deleteTier(name){
-  if(!confirm('Supprimer la tranche '+name+' ?')) return;
-  await fetch('/api/v1/amount-tiers/'+name,{method:'DELETE'});
-  loadTiers();
+  if(!confirm('Supprimer la tranche '+name+' ?'))return;
+  await fetch('/api/v1/amount-tiers/'+name,{method:'DELETE'});loadTiers();
+}
+
+/* ── GIE CB ── */
+async function loadCBRules(){
+  try{
+    const r=await fetch('/api/v1/giecb/rules');const d=await r.json();
+    const cap=d.cap;const tap=d.tap;const cl=d.contactless;
+    document.getElementById('cbGrid').innerHTML=`
+      <div class="cb-card">
+        <h3>💳 CAP — Card Acceptor Parameters</h3>
+        <div class="cb-param"><span class="k">Floor limit offline</span><span class="v ok">${fmtE(cap.offline_floor_limit)}</span></div>
+        <div class="cb-param"><span class="k">Max montant offline</span><span class="v warn">${fmtE(cap.max_offline_amount)}</span></div>
+        <div class="cb-param"><span class="k">Max montant online</span><span class="v warn">${fmtE(cap.max_online_amount)}</span></div>
+        <div class="cb-param"><span class="k">Seuil référer</span><span class="v crit">${fmtE(cap.referral_threshold)}</span></div>
+        <div class="cb-param"><span class="k">Seuil montant élevé</span><span class="v warn">${fmtE(cap.high_value_threshold)}</span></div>
+      </div>
+      <div class="cb-card">
+        <h3>📟 TAP — Terminal Application Parameters</h3>
+        <div class="cb-param"><span class="k">TAP1 Floor limit</span><span class="v ok">${fmtE(tap.TAP1_offline_floor_limit)}</span></div>
+        <div class="cb-param"><span class="k">TAP2 Cumul offline</span><span class="v warn">${fmtE(tap.TAP2_cumulative_offline_limit)}</span></div>
+        <div class="cb-param"><span class="k">TAP3 Max/transaction</span><span class="v warn">${fmtE(tap.TAP3_max_per_transaction)}</span></div>
+        <div class="cb-param"><span class="k">TAP4 Max tx offline</span><span class="v crit">${tap.TAP4_max_offline_count} txns</span></div>
+        <div class="cb-param"><span class="k">TAP5 Seuil risque term.</span><span class="v warn">${fmtE(tap.TAP5_terminal_risk_threshold)}</span></div>
+      </div>
+      <div class="cb-card">
+        <h3>📶 Sans contact NFC (DSP2)</h3>
+        <div class="cb-param"><span class="k">Plafond par tx</span><span class="v warn">${fmtE(cl.single_txn_limit)}</span></div>
+        <div class="cb-param"><span class="k">Sans PIN max</span><span class="v warn">${fmtE(cl.single_txn_limit_no_pin)}</span></div>
+        <div class="cb-param"><span class="k">Cumul offline max</span><span class="v crit">${fmtE(cl.cumulative_offline_limit)}</span></div>
+        <div class="cb-param"><span class="k">Tx offline consécutives</span><span class="v crit">${cl.max_consecutive_offline} max</span></div>
+        <div class="cb-param"><span class="k">Seuil low-value (SCA)</span><span class="v ok">${fmtE(cl.low_value_threshold)}</span></div>
+      </div>
+      <div class="cb-card">
+        <h3>🔐 Exemptions SCA (DSP2)</h3>
+        ${d.sca_exemptions.map(e=>'<div class="cb-param"><span class="k">'+e.code+'</span><span class="v ok" style="font-size:10px;text-align:right">'+e.name+(e.max_amount?' ≤'+fmtE(e.max_amount):'')+'</span></div>').join('')}
+      </div>
+    `;
+    /* AIDs */
+    document.getElementById('aidBody').innerHTML=d.aids.map(a=>
+      '<tr><td><span class="aid-tag">'+a.aid+'</span></td><td>'+a.name+'</td><td>'+a.scheme+'</td><td>'+a.brand+'</td><td>'+(a.contactless?'<span class="badge APPROVED">OUI</span>':'<span class="badge DECLINED">NON</span>')+'</td></tr>'
+    ).join('');
+    /* Floor limits */
+    const mccNames={'5411':'Supermarché','5412':'Convenience','5541':'Station service','5542':'Pompe auto',
+      '5912':'Pharmacie','5812':'Restaurant','5813':'Bar / tabac','5814':'Fast-food',
+      '5999':'Divers détail','7011':'Hôtel','7996':'Parc attractions','4111':'Transport local',
+      '4112':'Train','4121':'Taxi','4131':'Bus','4784':'Péage','DEFAULT':'Défaut'};
+    document.getElementById('floorBody').innerHTML=Object.entries(d.floor_limits).map(([mcc,amt])=>
+      '<tr><td style="font-family:monospace;color:#fbbf24">'+mcc+'</td><td>'+( mccNames[mcc]||mcc)+'</td><td style="color:'+(amt===0?'#f87171':'#34d399')+'">'+fmtE(amt)+'</td><td style="color:#64748b;font-size:10px">'+(amt===0?'⚠ Toujours en ligne':'Floor limit standard')+'</td></tr>'
+    ).join('');
+    /* Codes réponse */
+    document.getElementById('cbCodesGrid').innerHTML=Object.entries(d.response_codes).map(([code,label])=>
+      '<div style="background:#111827;border:1px solid #2d3748;border-radius:6px;padding:7px 10px;display:flex;align-items:center;gap:8px"><span style="font-family:monospace;font-weight:700;color:#fbbf24;min-width:24px">'+code+'</span><span style="color:#94a3b8;font-size:11px">'+label+'</span></div>'
+    ).join('');
+  }catch(e){console.error(e)}
+}
+function fmtE(n){return (n/100).toLocaleString('fr-FR',{minimumFractionDigits:2})+'€';}
+async function evalCB(){
+  const payload={pan:document.getElementById('cbPan').value,amount:parseInt(document.getElementById('cbAmt').value)||0,
+    currency:'978',transaction_type:document.getElementById('cbType').value,
+    mcc:document.getElementById('cbMcc').value||null,pos_entry_mode:document.getElementById('cbMode').value,
+    is_contactless:document.getElementById('cbMode').value==='071'};
+  const r=await fetch('/api/v1/giecb/evaluate',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify(payload)});
+  const d=await r.json();
+  const box=document.getElementById('cbEvalBox');
+  box.style.display='block';
+  box.style.borderColor=d.cb_result?.allowed?'#10b981':'#ef4444';
+  box.style.color=d.cb_result?.allowed?'#34d399':'#f87171';
+  box.textContent=JSON.stringify(d,null,2);
 }
 
 /* ── Cartes ── */
 async function loadCards(){
   try{
-    const r=await fetch('/api/v1/cards'); const d=await r.json();
+    const r=await fetch('/api/v1/cards');const d=await r.json();
     const sc={ACTIVE:'#34d399',BLOCKED:'#f87171',EXPIRED:'#f59e0b',LOST:'#fb923c',STOLEN:'#ef4444',RESTRICTED:'#94a3b8'};
     document.getElementById('cardGrid').innerHTML=d.cards.map(c=>`
       <div class="card-item">
-        <div class="pan">${c.pan.replace(/(\\d{4})/g,'$1 ').trim()}</div>
+        <div class="pan">${c.pan.replace(/(\d{4})/g,'$1 ').trim()}</div>
         <div class="name">${c.cardholder_name}</div>
         <div class="details">Expire: ${c.expiry.slice(0,2)}/${c.expiry.slice(2)} · PSN: ${c.psn}</div>
-        <div class="details" style="margin-top:4px">
-          <span style="color:${sc[c.status]||'#94a3b8'};font-weight:600">● ${c.status}</span> · ATC: ${c.last_atc}
+        <div class="details" style="margin-top:3px">
+          <span style="color:${sc[c.status]||'#94a3b8'};font-weight:600">● ${c.status}</span>
+          &nbsp;·&nbsp; <span style="color:#fbbf24">${c.cb_brand||'?'}</span>
+          &nbsp;·&nbsp; ATC: ${c.last_atc}
         </div>
-        <div class="balance">${(c.balance/100).toFixed(2)}</div>
-        <div class="details">Limite/j: ${(c.daily_limit/100).toFixed(2)} · Dépensé: ${(c.daily_spent/100).toFixed(2)}</div>
-      </div>
-    `).join('');
+        ${c.cb_is_contactless?'<div class="details" style="color:#60a5fa;margin-top:2px">📶 Cumul SC: '+c.contactless_cumul_formatted+'</div>':''}
+        <div class="balance">${(c.balance/100).toFixed(2)}€</div>
+        <div class="details">Limite/j: ${(c.daily_limit/100).toFixed(2)}€ · Dépensé: ${(c.daily_spent/100).toFixed(2)}€</div>
+        ${c.block_reason?'<div class="details" style="color:#f87171;margin-top:3px">⛔ '+c.block_reason+'</div>':''}
+        <div class="card-actions">
+          ${c.status==='ACTIVE'?'<button class="btn-sm danger" onclick="blockCard(\''+c.pan.replace(/\s/g,'')+'\')">Bloquer</button>':''}
+          ${(c.status==='BLOCKED'||c.status==='RESTRICTED')?'<button class="btn-sm success" onclick="unblockCard(\''+c.pan.replace(/\s/g,'')+'\')">Débloquer</button>':''}
+        </div>
+      </div>`).join('');
   }catch(e){}
 }
-
-function escHtml(s){return String(s).replace(/&/g,'&amp;').replace(/</g,'&lt;').replace(/>/g,'&gt;');}
-async function exportHistory(){
-  const r=await fetch('/api/v1/transactions?limit=200');
+async function blockCard(pan){
+  const reason=prompt('Motif de blocage (optionnel):','Blocage manuel');
+  if(reason===null)return;
+  await fetch('/api/v1/cards/'+pan+'/block',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({reason})});
+  loadCards();loadStats();
+}
+async function unblockCard(pan){
+  const reason=prompt('Motif de déblocage (optionnel):','Déblocage manuel');
+  if(reason===null)return;
+  const r=await fetch('/api/v1/cards/'+pan+'/unblock',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({reason})});
   const d=await r.json();
-  const blob=new Blob([JSON.stringify(d,null,2)],{type:'application/json'});
-  const a=document.createElement('a');
-  a.href=URL.createObjectURL(blob);
-  a.download='historique_autorisations_'+new Date().toISOString().slice(0,10)+'.json';
-  a.click();
+  if(!r.ok){alert('Erreur: '+d.error);return;}
+  loadCards();loadStats();
 }
 
+async function exportHistory(){
+  const r=await fetch('/api/v1/transactions?limit=200');const d=await r.json();
+  const blob=new Blob([JSON.stringify(d,null,2)],{type:'application/json'});
+  const a=document.createElement('a');a.href=URL.createObjectURL(blob);
+  a.download='historique_'+new Date().toISOString().slice(0,10)+'.json';a.click();
+}
+
+function esc(s){return String(s).replace(/&/g,'&amp;').replace(/</g,'&lt;').replace(/>/g,'&gt;');}
+
 loadStats();
-setInterval(loadStats,10000);
+setInterval(loadStats,12000);
 </script>
 </body>
 </html>
@@ -684,9 +820,11 @@ def health():
     return jsonify({
         "status": "UP",
         "service": "EMV Authorization Server",
-        "version": "1.1.0",
+        "version": "1.2.0-GIE-CB",
         "timestamp": datetime.utcnow().isoformat() + "Z",
-        "features": ["EMV 4.3", "ISO 8583", "ARQC/ARPC", "TPA Response", "Amount Tiers"],
+        "features": ["EMV 4.3", "ISO 8583", "ARQC/ARPC",
+                     "TPA Response", "Amount Tiers", "GIE CB Rules",
+                     "Card Block/Unblock"],
     })
 
 
@@ -697,18 +835,17 @@ def authorize_endpoint():
     data = request.get_json()
     if not data:
         return jsonify({"error": "Invalid JSON body"}), 400
-
     pan = data.get("pan", "").replace(" ", "")
     if not pan:
         return jsonify({"error": "PAN is required"}), 400
-
     try:
         amount = int(data.get("amount", 0))
     except (ValueError, TypeError):
         return jsonify({"error": "Invalid amount"}), 400
-
     currency = str(data.get("currency", "840")).zfill(3)
     transaction_type = str(data.get("transaction_type", "00")).zfill(2)
+    pos_entry_mode = data.get("pos_entry_mode", "051")
+    is_contactless = data.get("is_contactless", pos_entry_mode[:2] in ("07", "91"))
 
     result = authorize(
         pan=pan, amount=amount, currency=currency,
@@ -717,8 +854,10 @@ def authorize_endpoint():
         terminal_id=data.get("terminal_id"),
         merchant_id=data.get("merchant_id"),
         merchant_name=data.get("merchant_name"),
-        pos_entry_mode=data.get("pos_entry_mode", "051"),
+        pos_entry_mode=pos_entry_mode,
         skip_crypto=data.get("skip_crypto", False),
+        mcc=data.get("mcc"),
+        is_contactless=is_contactless,
     )
     return jsonify(result.to_dict(include_tpa=True))
 
@@ -732,7 +871,6 @@ def authorize_iso8583():
         msg = parse_from_dict(data)
     except Exception as e:
         return jsonify({"error": "ISO 8583 parse error: " + str(e)}), 400
-
     result = authorize(
         pan=msg.pan, amount=msg.amount, currency=msg.currency_code,
         transaction_type=msg.transaction_type,
@@ -760,25 +898,20 @@ def list_transactions():
         offset = int(request.args.get("offset", 0))
     except (ValueError, TypeError):
         return jsonify({"error": "Invalid pagination parameters"}), 400
-
     status_filter = request.args.get("status")
     tier_filter = request.args.get("tier")
-
     transactions = transaction_log.get_all(
         limit=limit, offset=offset,
         status=status_filter, tier=tier_filter)
-
     all_filtered = transaction_log.get_all(
         limit=99999, offset=0,
         status=status_filter, tier=tier_filter)
-
     return jsonify({
         "transactions": [t.to_dict() for t in transactions],
         "count": len(transactions),
         "total_filtered": len(all_filtered),
         "limit": limit,
         "offset": offset,
-        "filters": {"status": status_filter, "tier": tier_filter},
     })
 
 
@@ -787,7 +920,6 @@ def get_transaction(transaction_id):
     txn = transaction_log.get(transaction_id)
     if not txn:
         return jsonify({"error": "Transaction not found"}), 404
-
     result = txn.to_dict()
     tpa = TPAResponse(txn, type("R", (), {
         "approved": txn.status == "APPROVED",
@@ -805,7 +937,6 @@ def get_transaction_tpa(transaction_id):
     txn = transaction_log.get(transaction_id)
     if not txn:
         return jsonify({"error": "Transaction not found"}), 404
-
     tpa = TPAResponse(txn, type("R", (), {
         "approved": txn.status == "APPROVED",
         "response_code": txn.response_code,
@@ -840,21 +971,18 @@ def get_transactions_by_pan(pan):
 def list_amount_tiers():
     tiers = get_all_tiers()
     return jsonify({
-        "tiers": [
-            {
-                "name": t.name, "label": t.label,
-                "min_amount": t.min_amount, "max_amount": t.max_amount,
-                "require_online": t.require_online, "require_arqc": t.require_arqc,
-                "require_pin": t.require_pin,
-                "auto_approve_offline": t.auto_approve_offline,
-                "risk_level": t.risk_level, "floor_limit": t.floor_limit,
-                "velocity_check": t.velocity_check,
-                "max_daily_count": t.max_daily_count,
-                "description": t.description,
-                "is_custom": False,
-            }
-            for t in tiers
-        ],
+        "tiers": [{
+            "name": t.name, "label": t.label,
+            "min_amount": t.min_amount, "max_amount": t.max_amount,
+            "require_online": t.require_online, "require_arqc": t.require_arqc,
+            "require_pin": t.require_pin,
+            "auto_approve_offline": t.auto_approve_offline,
+            "risk_level": t.risk_level, "floor_limit": t.floor_limit,
+            "velocity_check": t.velocity_check,
+            "max_daily_count": t.max_daily_count,
+            "description": t.description,
+            "is_custom": False,
+        } for t in tiers],
         "count": len(tiers),
     })
 
@@ -892,9 +1020,8 @@ def evaluate_tier():
         amount = int(request.args.get("amount", 0))
     except (ValueError, TypeError):
         return jsonify({"error": "Invalid amount"}), 400
-
-    from emv.amount_rules import evaluate_amount
-    decision = evaluate_amount(amount, "00", has_arqc=bool(request.args.get("has_arqc")))
+    decision = evaluate_amount(amount, "00",
+                               has_arqc=bool(request.args.get("has_arqc")))
     t = decision.tier
     return jsonify({
         "amount": amount,
@@ -910,6 +1037,87 @@ def evaluate_tier():
     })
 
 
+# ── GIE CB ────────────────────────────────────────────────────────────────────
+
+@app.route("/api/v1/giecb/rules", methods=["GET"])
+def giecb_rules():
+    return jsonify({
+        "cap": CB_CAP,
+        "tap": CB_TAP,
+        "contactless": CB_CONTACTLESS,
+        "sca_exemptions": CB_SCA_EXEMPTIONS,
+        "service_indicators": CB_SERVICE_INDICATORS,
+        "response_codes": CB_RESPONSE_CODES,
+        "aids": [{"aid": k, **v} for k, v in CB_AIDS.items()],
+        "floor_limits": CB_MCC_FLOOR_LIMITS,
+    })
+
+
+@app.route("/api/v1/giecb/evaluate", methods=["POST"])
+def giecb_evaluate():
+    data = request.get_json()
+    if not data:
+        return jsonify({"error": "Invalid JSON body"}), 400
+    pan = data.get("pan", "").replace(" ", "")
+    try:
+        amount = int(data.get("amount", 0))
+    except (ValueError, TypeError):
+        return jsonify({"error": "Invalid amount"}), 400
+    card = card_db.get_card(pan)
+    cl_cumul = card.contactless_cumul if card else 0
+    cl_consec = card.consecutive_offline if card else 0
+    aid = data.get("aid") or (card.aid if card else None)
+    result = evaluate_cb_rules(
+        pan=pan, amount=amount,
+        currency=data.get("currency", "978"),
+        transaction_type=data.get("transaction_type", "00"),
+        mcc=data.get("mcc"),
+        aid_hex=aid,
+        is_contactless=data.get("is_contactless", False),
+        contactless_cumul=cl_cumul,
+        consecutive_offline=cl_consec,
+        pos_entry_mode=data.get("pos_entry_mode", "051"),
+    )
+    card_info = identify_card(pan, aid)
+    return jsonify({
+        "pan_masked": "*" * (len(pan) - 4) + pan[-4:] if len(pan) > 4 else pan,
+        "amount": amount,
+        "amount_formatted": "{:.2f}€".format(amount / 100),
+        "card_info": {
+            "scheme": card_info.scheme,
+            "brand": card_info.brand,
+            "aid_name": card_info.aid_name,
+            "supports_contactless": card_info.supports_contactless,
+        },
+        "cb_result": result.to_dict(),
+    })
+
+
+@app.route("/api/v1/giecb/aids", methods=["GET"])
+def giecb_aids():
+    return jsonify({
+        "aids": [{"aid": k, **v} for k, v in CB_AIDS.items()],
+        "count": len(CB_AIDS),
+    })
+
+
+@app.route("/api/v1/giecb/floor-limits", methods=["GET"])
+def giecb_floor_limits():
+    return jsonify({
+        "floor_limits": CB_MCC_FLOOR_LIMITS,
+        "count": len(CB_MCC_FLOOR_LIMITS),
+        "description": "Floor limits CB en centimes par MCC. Valeur 0 = autorisation en ligne obligatoire.",
+    })
+
+
+@app.route("/api/v1/giecb/response-codes", methods=["GET"])
+def giecb_response_codes():
+    return jsonify({
+        "response_codes": CB_RESPONSE_CODES,
+        "count": len(CB_RESPONSE_CODES),
+    })
+
+
 # ── TPA ───────────────────────────────────────────────────────────────────────
 
 @app.route("/api/v1/tpa/fields", methods=["GET"])
@@ -917,6 +1125,7 @@ def get_tpa_fields():
     return jsonify({
         "fields": TPA_FIELD_DEFINITIONS,
         "count": len(TPA_FIELD_DEFINITIONS),
+        "cb_fields": [k for k in TPA_FIELD_DEFINITIONS if k.startswith("CB")],
     })
 
 
@@ -948,7 +1157,8 @@ def parse_tlv():
 @app.route("/api/v1/cards", methods=["GET"])
 def list_cards():
     cards = card_db.all_cards()
-    return jsonify({"cards": [c.to_dict(masked=True) for c in cards], "count": len(cards)})
+    return jsonify({"cards": [c.to_dict(masked=True) for c in cards],
+                    "count": len(cards)})
 
 
 @app.route("/api/v1/cards/<pan>", methods=["GET"])
@@ -978,6 +1188,9 @@ def create_card():
         status=data.get("status", CardStatus.ACTIVE),
         balance=int(data.get("balance", 100000)),
         daily_limit=int(data.get("daily_limit", 500000)),
+        cb_scheme=data.get("cb_scheme", "VISA"),
+        cb_brand=data.get("cb_brand", "VISA CB"),
+        aid=data.get("aid"),
     )
     card_db.add_card(card)
     return jsonify({"message": "Card created", "card": card.to_dict(masked=True)}), 201
@@ -985,9 +1198,31 @@ def create_card():
 
 @app.route("/api/v1/cards/<pan>/block", methods=["POST"])
 def block_card(pan):
-    if card_db.block_card(pan.replace(" ", "")):
-        return jsonify({"message": "Card blocked"})
+    data = request.get_json() or {}
+    reason = data.get("reason", "Blocage via API")
+    if card_db.block_card(pan.replace(" ", ""), reason=reason):
+        return jsonify({"message": "Card blocked", "reason": reason})
     return jsonify({"error": "Card not found"}), 404
+
+
+@app.route("/api/v1/cards/<pan>/unblock", methods=["POST"])
+def unblock_card(pan):
+    """
+    Débloque une carte en statut BLOCKED ou RESTRICTED.
+    Les cartes LOST ou STOLEN ne peuvent pas être débloquées via cette API.
+    Body JSON optionnel: {"reason": "Motif de déblocage"}
+    """
+    data = request.get_json() or {}
+    reason = data.get("reason", "Déblocage via API")
+    success, message = card_db.unblock_card(pan.replace(" ", ""), reason=reason)
+    if success:
+        card = card_db.get_card(pan.replace(" ", ""))
+        return jsonify({
+            "message": message,
+            "reason": reason,
+            "card": card.to_dict(masked=True) if card else None,
+        })
+    return jsonify({"error": message}), 400
 
 
 # ── Stats ─────────────────────────────────────────────────────────────────────
