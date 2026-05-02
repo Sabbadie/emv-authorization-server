@@ -1,5 +1,5 @@
 """
-Transaction model for logging and managing authorization transactions.
+Transaction model — avec champs TPA et tranche de montant.
 """
 
 import uuid
@@ -39,6 +39,10 @@ class Transaction:
         self.processed_at = None
         self.decline_reason = None
         self.rrn = self._generate_rrn()
+        # Champs TPA / tranche montant
+        self.amount_tier = None
+        self.risk_level = None
+        self.auth_path = None
 
     def _generate_rrn(self):
         now = datetime.utcnow()
@@ -86,6 +90,9 @@ class Transaction:
             "response_code": self.response_code,
             "decline_reason": self.decline_reason,
             "pos_entry_mode": self.pos_entry_mode,
+            "amount_tier": self.amount_tier,
+            "risk_level": self.risk_level,
+            "auth_path": self.auth_path,
             "created_at": self.created_at,
             "processed_at": self.processed_at,
         }
@@ -110,8 +117,12 @@ class TransactionLog:
         ids = self._pan_index.get(pan, [])
         return [self._transactions[i] for i in ids[-limit:] if i in self._transactions]
 
-    def get_all(self, limit=100, offset=0):
+    def get_all(self, limit=100, offset=0, status=None, tier=None):
         all_txns = list(self._transactions.values())
+        if status:
+            all_txns = [t for t in all_txns if t.status == status.upper()]
+        if tier:
+            all_txns = [t for t in all_txns if t.amount_tier == tier.upper()]
         all_txns.sort(key=lambda t: t.created_at, reverse=True)
         return all_txns[offset:offset + limit]
 
@@ -125,6 +136,18 @@ class TransactionLog:
                      if t.status == TransactionStatus.ERROR)
         total_amount = sum(t.amount for t in self._transactions.values()
                            if t.status == TransactionStatus.APPROVED)
+
+        by_tier = {}
+        by_path = {}
+        by_risk = {}
+        for t in self._transactions.values():
+            if t.amount_tier:
+                by_tier[t.amount_tier] = by_tier.get(t.amount_tier, 0) + 1
+            if t.auth_path:
+                by_path[t.auth_path] = by_path.get(t.auth_path, 0) + 1
+            if t.risk_level:
+                by_risk[t.risk_level] = by_risk.get(t.risk_level, 0) + 1
+
         return {
             "total": total,
             "approved": approved,
@@ -134,6 +157,9 @@ class TransactionLog:
                 (approved / total * 100) if total > 0 else 0),
             "total_approved_amount": total_amount,
             "total_approved_amount_formatted": "{:.2f}".format(total_amount / 100),
+            "by_tier": by_tier,
+            "by_auth_path": by_path,
+            "by_risk_level": by_risk,
         }
 
 
