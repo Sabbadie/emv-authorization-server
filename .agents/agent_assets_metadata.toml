@@ -6,3 +6,9 @@ id = "rpiMY-ZTO3aw9wSA2AqJ5"
 uri = "file://evolutions.md"
 type = "text"
 title = "evolutions.md — Roadmap technique EMV GIE CB"
+
+[[outputs]]
+id = "C8MJySKuo6TlSj8mxbFlI"
+uri = "file://claude.md"
+type = "text"
+title = "claude.md — Modèle IA & historique de session"
