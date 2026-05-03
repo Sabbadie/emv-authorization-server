@@ -42,6 +42,10 @@ from models.card import card_db, Card, CardStatus
 from models.transaction import transaction_log, TransactionStatus
 from models.tpa_response import TPAResponse, TPA_FIELD_DEFINITIONS
 from config import Config
+from pydantic import ValidationError
+from schemas import AuthorizeRequest, pydantic_error_response
+from emv.alerts import get_active_alerts, get_alert_summary
+from database import db_health as _db_health
 
 # ── S3 : Masquage PAN dans les logs ─────────────────────────────────────────
 _PAN_RE = re.compile(r'\b([3-6]\d{5})\d{6,10}(\d{4})\b')
@@ -242,8 +246,12 @@ tr:hover td{background:rgba(0,0,0,.15)}
 .section-hdr h2{font-size:13px;font-weight:600;color:var(--text)}
 .cb-eval-box{background:var(--bg);border:1px solid #fbbf24;border-radius:8px;padding:12px;font-family:monospace;font-size:11px;color:#fbbf24;white-space:pre-wrap;word-break:break-all;max-height:300px;overflow-y:auto;display:none}
 /* Alertes visuelles (D5) */
-.alert-banner{display:none;background:#2d1a0a;border:1px solid #c2410c;border-radius:8px;padding:10px 14px;margin:12px 18px;font-size:11px;color:#f97316}
-.alert-banner.show{display:flex;align-items:center;gap:8px}
+.alert-banner{display:none;border-radius:8px;padding:10px 14px;margin:0 0 14px;font-size:12px;align-items:center;gap:8px;flex-wrap:wrap}
+.alert-banner.show{display:flex}
+.alert-banner.show.critical{background:#2d0f0f;border:1px solid #991b1b;color:#f87171}
+.alert-banner.show.warning{background:#2d1a0a;border:1px solid #c2410c;color:#f97316}
+.alert-banner.show.info{background:#1a2a4a;border:1px solid #1e40af;color:#60a5fa}
+.alert-item{padding:2px 8px;border-radius:5px;font-size:11px;border:1px solid currentColor;opacity:.85}
 /* Charts */
 .charts-grid{display:grid;grid-template-columns:repeat(auto-fill,minmax(340px,1fr));gap:16px;padding:16px}
 .chart-card{background:var(--surface2);border:1px solid var(--border);border-radius:10px;padding:14px}
@@ -784,19 +792,24 @@ async function loadStats(){
   }catch(e){}
 }
 
-function checkAlerts(){
-  if(!_lastStats)return;
-  const banner=document.getElementById('alertBanner');
-  const msgs=[];
-  const total=_lastStats.total||0;
-  const approved=_lastStats.approved||0;
-  if(total>5&&approved/total<0.5)msgs.push('⚠ Taux d\'approbation bas ('+_lastStats.approval_rate+')');
-  if(msgs.length>0){
-    document.getElementById('alertText').textContent=msgs.join(' | ');
-    banner.classList.add('show');
-  }else{
-    banner.classList.remove('show');
-  }
+async function checkAlerts(){
+  try{
+    const r=await fetch('/api/v1/alerts');
+    if(!r.ok)return;
+    const d=await r.json();
+    const alerts=d.alerts||[];
+    const banner=document.getElementById('alertBanner');
+    const span=document.getElementById('alertText');
+    if(alerts.length===0){banner.className='alert-banner';return;}
+    const hasCrit=alerts.some(a=>a.severity==='CRITICAL');
+    const hasWarn=alerts.some(a=>a.severity==='WARNING');
+    const cls=hasCrit?'show critical':hasWarn?'show warning':'show info';
+    banner.className='alert-banner '+cls;
+    const icon=hasCrit?'🚨':hasWarn?'⚠':'ℹ';
+    const shown=alerts.slice(0,3);
+    const extra=alerts.length>3?' <span class="alert-item">+'+( alerts.length-3)+' alertes</span>':'';
+    span.innerHTML=icon+' '+shown.map(a=>'<span class="alert-item">'+esc(a.message)+'</span>').join(' ')+extra;
+  }catch(e){}
 }
 
 // ── D1 : SSE temps réel ───────────────────────────────────────────────────────
@@ -1240,7 +1253,9 @@ function esc(s){return String(s).replace(/&/g,'&amp;').replace(/</g,'&lt;').repl
 
 loadStats();
 startSSE();
+checkAlerts();
 setInterval(loadStats,15000);
+setInterval(checkAlerts,30000);
 </script>
 </body>
 </html>
@@ -1277,9 +1292,10 @@ def health():
     return jsonify({
         "status": "UP",
         "service": "EMV Authorization Server",
-        "version": "1.5.0-GIE-CB",
+        "version": "1.6.0",
         "timestamp": datetime.utcnow().isoformat() + "Z",
         "api_key_enabled": bool(Config.API_KEY),
+        "database": _db_health(),
         "features": ["EMV 4.3", "ISO 8583", "ARQC/ARPC",
                      "TPA Response", "Amount Tiers", "GIE CB Rules",
                      "Card Block/Unblock", "CVV/CVC E1",
@@ -1291,7 +1307,29 @@ def health():
                      "BIN Blacklist E7", "Currency Conversion E8",
                      "Preauthorization E4", "Chargebacks E6",
                      "Issuer Scripts C4", "Risk Scoring C5",
-                     "Webhooks A1", "Swagger UI D3"],
+                     "Webhooks A1", "Swagger UI D3",
+                     "PostgreSQL P1", "Pydantic S4", "Visual Alerts D5"],
+    })
+
+
+@app.route("/api/v1/alerts", methods=["GET"])
+def get_alerts_endpoint():
+    """D5 — Alertes visuelles temps réel (sans contact, quota, refus, chargebacks)."""
+    preauths    = get_all_preauths(limit=200)
+    chargebacks = get_all_chargebacks(limit=200)
+    alerts  = get_active_alerts(
+        card_db=card_db,
+        transaction_log=transaction_log,
+        chargebacks=chargebacks,
+        preauths=preauths,
+        bin_blacklist_obj=bin_blacklist,
+    )
+    summary = get_alert_summary(alerts)
+    return jsonify({
+        "alerts":       alerts,
+        "summary":      summary,
+        "count":        len(alerts),
+        "generated_at": datetime.utcnow().isoformat() + "Z",
     })
 
 
@@ -1300,31 +1338,30 @@ def health():
 @app.route("/api/v1/authorize", methods=["POST"])
 @limiter.limit(Config.RATE_LIMIT_AUTHORIZE)
 def authorize_endpoint():
-    data = request.get_json()
-    if not data:
+    # S4 — Validation stricte Pydantic
+    raw = request.get_json()
+    if not raw:
         return jsonify({"error": "Invalid JSON body"}), 400
-    pan = data.get("pan", "").replace(" ", "")
-    if not pan:
-        return jsonify({"error": "PAN is required"}), 400
     try:
-        amount = int(data.get("amount", 0))
-    except (ValueError, TypeError):
-        return jsonify({"error": "Invalid amount"}), 400
-    currency = str(data.get("currency", "840")).zfill(3)
-    transaction_type = str(data.get("transaction_type", "00")).zfill(2)
-    pos_entry_mode = data.get("pos_entry_mode", "051")
-    is_contactless = data.get("is_contactless", pos_entry_mode[:2] in ("07", "91"))
+        req = AuthorizeRequest.model_validate(raw)
+    except ValidationError as exc:
+        return jsonify(pydantic_error_response(exc)), 422
+
+    pan              = req.pan
+    amount           = req.amount
+    currency         = req.currency
+    transaction_type = req.transaction_type
+    pos_entry_mode   = req.pos_entry_mode or raw.get("pos_entry_mode", "051")
+    is_contactless   = req.is_contactless or (pos_entry_mode[:2] in ("07", "91"))
 
     # E1 — Vérification CVV optionnelle
-    cvv2 = data.get("cvv2") or data.get("cvv")
-    expiry_yymm = data.get("expiry_yymm") or data.get("expiry", "")
     cvv_valid = None
-    if cvv2 and expiry_yymm:
+    if req.cvv2 and req.expiry_yymm:
         try:
             cvv_valid = verify_cvv(
-                provided=str(cvv2),
+                provided=req.cvv2,
                 pan=pan,
-                expiry_yymm=str(expiry_yymm),
+                expiry_yymm=req.expiry_yymm,
                 cvk1=Config.CVK1,
                 cvk2=Config.CVK2,
                 cvv_type="CVV2",
@@ -1335,13 +1372,13 @@ def authorize_endpoint():
     result = authorize(
         pan=pan, amount=amount, currency=currency,
         transaction_type=transaction_type,
-        field_55=data.get("field_55") or data.get("emv_data"),
-        terminal_id=data.get("terminal_id"),
-        merchant_id=data.get("merchant_id"),
-        merchant_name=data.get("merchant_name"),
+        field_55=req.field_55 or raw.get("emv_data"),
+        terminal_id=req.terminal_id,
+        merchant_id=req.merchant_id,
+        merchant_name=req.merchant_name,
         pos_entry_mode=pos_entry_mode,
-        skip_crypto=data.get("skip_crypto", False),
-        mcc=data.get("mcc"),
+        skip_crypto=raw.get("skip_crypto", False),
+        mcc=req.mcc,
         is_contactless=is_contactless,
     )
     result_dict = result.to_dict(include_tpa=True)

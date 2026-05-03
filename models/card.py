@@ -231,4 +231,26 @@ class CardDatabase:
         }
 
 
-card_db = CardDatabase()
+
+class _CardDBProxy:
+    """
+    Proxy transparent vers l'implémentation active (in-memory ou DB-backed).
+    Permet de permuter l'implémentation sans changer les références existantes.
+    """
+    def __init__(self, impl):
+        object.__setattr__(self, "_impl", impl)
+
+    def _swap(self, new_impl):
+        object.__setattr__(self, "_impl", new_impl)
+
+    def __getattr__(self, name):
+        return getattr(object.__getattribute__(self, "_impl"), name)
+
+    def __setattr__(self, name, value):
+        if name == "_impl":
+            object.__setattr__(self, name, value)
+        else:
+            setattr(object.__getattribute__(self, "_impl"), name, value)
+
+
+card_db = _CardDBProxy(CardDatabase())

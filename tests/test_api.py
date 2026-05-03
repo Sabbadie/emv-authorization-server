@@ -139,7 +139,8 @@ class TestAuthorize:
         resp = post_json(client, "/api/v1/authorize", {
             "amount": 5000, "currency": "978", "transaction_type": "00",
         })
-        assert resp.status_code == 400
+        # S4 — Pydantic renvoie 422 pour champ obligatoire manquant
+        assert resp.status_code in (400, 422)
 
     def test_zero_amount_declined_13(self, client):
         data = post_json(client, "/api/v1/authorize", {

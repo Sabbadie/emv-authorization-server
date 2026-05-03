@@ -1,41 +1,74 @@
 services:
+
+  # ── PostgreSQL ──────────────────────────────────────────────────────────────
+  postgres:
+    image: postgres:15-alpine
+    container_name: emv-postgres
+    restart: unless-stopped
+
+    environment:
+      POSTGRES_DB:       emv_auth
+      POSTGRES_USER:     emv
+      POSTGRES_PASSWORD: emv_secret_changez_en_prod
+
+    volumes:
+      - db_data:/var/lib/postgresql/data
+
+    ports:
+      - "5432:5432"
+
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U emv -d emv_auth"]
+      interval: 10s
+      timeout:  5s
+      retries:  5
+      start_period: 10s
+
+
+  # ── EMV Authorization Server ────────────────────────────────────────────────
   emv-server:
     build:
       context: .
       dockerfile: Dockerfile
       target: runtime
-    image: emv-authorization-server:1.4.0
+    image: emv-authorization-server:1.6.0
     container_name: emv-auth-server
     restart: unless-stopped
+    depends_on:
+      postgres:
+        condition: service_healthy
 
     ports:
       - "5000:5000"   # API REST + tableau de bord
       - "8583:8583"   # Interface TCP ISO 8583 (terminaux)
 
     volumes:
-      - emv-data:/app/data   # Persistance des snapshots JSON
+      - emv-data:/app/data   # Snapshots JSON (P2 — backup secondaire)
 
     environment:
-      # ── Serveur ──────────────────────────────────────────────
+      # ── Serveur ──────────────────────────────────────────────────
       HOST:  "0.0.0.0"
       PORT:  "5000"
       DEBUG: "false"
 
-      # ── Interface TCP ISO 8583 ───────────────────────────────
+      # ── Interface TCP ISO 8583 ───────────────────────────────────
       TCP_ENABLED: "true"
       TCP_HOST:    "0.0.0.0"
       TCP_PORT:    "8583"
 
-      # ── Sécurité ─────────────────────────────────────────────
+      # ── Sécurité ─────────────────────────────────────────────────
       # Décommenter et renseigner en production :
       # EMV_API_KEY: "votre-cle-api-secrete"
       SECRET_KEY: "emv-auth-server-secret-changez-en-prod"
 
-      # ── Limites métier ───────────────────────────────────────
+      # ── P1 — Base de données PostgreSQL ──────────────────────────
+      DATABASE_URL: "postgresql://emv:emv_secret_changez_en_prod@postgres:5432/emv_auth"
+
+      # ── Limites métier ───────────────────────────────────────────
       MAX_TRANSACTION_AMOUNT: "1000000"   # 10 000,00 € (en centimes)
       DAILY_LIMIT:            "500000"    #  5 000,00 €
 
-      # ── Rate limiting ────────────────────────────────────────
+      # ── Rate limiting ────────────────────────────────────────────
       RATE_LIMIT_DEFAULT:   "300 per minute"
       RATE_LIMIT_AUTHORIZE: "30 per minute"
       RATE_LIMIT_BATCH:     "5 per minute"
@@ -47,9 +80,12 @@ services:
       CVK1:    "0123456789ABCDEF"
       CVK2:    "FEDCBA9876543210"
 
-      # ── Persistance / snapshots JSON ────────────────────────
-      SNAPSHOT_ENABLED:      "true"
+      # ── Persistance / snapshots JSON ────────────────────────────
+      SNAPSHOT_ENABLED:       "false"   # Désactivé si DB active
       SNAPSHOT_INTERVAL_SECS: "120"
+
+      # ── A1 — Webhooks ────────────────────────────────────────────
+      # WEBHOOK_URL: "https://mon-endpoint.exemple.com/webhook"
 
     healthcheck:
       test: ["CMD", "python", "-c",
@@ -57,8 +93,11 @@ services:
       interval: 30s
       timeout:  10s
       retries:  3
-      start_period: 10s
+      start_period: 15s
+
 
 volumes:
   emv-data:
+    driver: local
+  db_data:
     driver: local

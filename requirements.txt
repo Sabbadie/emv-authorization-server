@@ -8,3 +8,12 @@ itsdangerous==2.2.0
 Flask-Limiter==4.1.1
 limits==5.8.0
 pycryptodome==3.23.0
+
+# P1 — Persistance PostgreSQL
+SQLAlchemy==2.0.36
+alembic==1.14.1
+psycopg2-binary==2.9.10
+
+# S4 — Validation Pydantic
+pydantic==2.10.6
+pydantic-settings==2.7.1

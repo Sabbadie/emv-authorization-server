@@ -9,6 +9,11 @@ FROM python:3.11-slim AS builder
 
 WORKDIR /build
 
+# libpq-dev requis pour compiler psycopg2-binary
+RUN apt-get update && apt-get install -y --no-install-recommends \
+        libpq-dev gcc \
+    && rm -rf /var/lib/apt/lists/*
+
 COPY requirements.txt .
 
 RUN pip install --upgrade pip \
@@ -19,8 +24,13 @@ RUN pip install --upgrade pip \
 FROM python:3.11-slim AS runtime
 
 LABEL maintainer="EMV Auth Server" \
-      version="1.4.0" \
-      description="Serveur d'autorisation EMV 4.3 / ISO 8583"
+      version="1.6.0" \
+      description="Serveur d'autorisation EMV 4.3 / ISO 8583 + PostgreSQL"
+
+# libpq nécessaire pour psycopg2 à l'exécution
+RUN apt-get update && apt-get install -y --no-install-recommends \
+        libpq5 \
+    && rm -rf /var/lib/apt/lists/*
 
 WORKDIR /app
 

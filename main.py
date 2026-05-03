@@ -1,6 +1,7 @@
 """
-EMV Authorization Server v1.3.0 — Entry Point
-Intègre : P2 (backup JSON périodique), SIGTERM handler
+EMV Authorization Server v1.6.0 — Entry Point
+Intègre : P1 (PostgreSQL + SQLAlchemy), P2 (backup JSON),
+          S4 (Pydantic validation), D5 (Dashboard alertes)
 """
 
 import logging
@@ -16,12 +17,35 @@ logger = logging.getLogger(__name__)
 
 if __name__ == "__main__":
     logger.info("=" * 60)
-    logger.info("  Serveur d'Autorisation EMV v1.3.0")
+    logger.info("  Serveur d'Autorisation EMV v1.6.0")
     logger.info("  EMV 4.3 | ISO 8583 | ARQC/ARPC | GIE CB | CVV")
-    logger.info("  S1:APIKey | S2:RateLimit | S3:PANMask")
-    logger.info("  D1:Charts | D2:CSV | D4:Batch | D6:DarkMode")
-    logger.info("  E1:CVV | P2:JSONBackup")
+    logger.info("  S1:APIKey | S2:RateLimit | S3:PANMask | S4:Pydantic")
+    logger.info("  D1:Charts | D2:CSV | D4:Batch | D5:Alertes | D6:DarkMode")
+    logger.info("  E1:CVV | P1:PostgreSQL | P2:JSONBackup")
     logger.info("=" * 60)
+
+    # ── P1 : Initialisation base de données ────────────────────────────────────
+    if Config.DATABASE_URL:
+        try:
+            from database import init_db
+            db_ok = init_db()
+            if db_ok:
+                logger.info("P1 — Base de données PostgreSQL connectée")
+                # Permute les singletons vers les implémentations DB-backed
+                from models.card_repository import DBCardDatabase
+                from models.transaction_repository import DBTransactionLog
+                from models.card import card_db
+                from models.transaction import transaction_log
+                card_db._swap(DBCardDatabase())
+                transaction_log._swap(DBTransactionLog())
+                logger.info("P1 — Repositories DB-backed activés (Card + Transaction)")
+            else:
+                logger.warning("P1 — DB indisponible, mode in-memory actif")
+        except Exception as exc:
+            logger.warning("P1 — Erreur init DB, mode in-memory : %s", exc)
+    else:
+        logger.info("P1 — DATABASE_URL non défini — stockage en mémoire actif")
+
     logger.info("Démarrage sur http://%s:%d", Config.HOST, Config.PORT)
 
     # P2 — Backup JSON périodique

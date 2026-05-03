@@ -1,7 +1,7 @@
 # Évolutions — Serveur d'Autorisation EMV GIE CB
 
-> Dernière mise à jour : **03 mai 2026** — Version courante : **v1.5.0**  
-> Suite de tests : **1 213 tests** (toutes catégories)  
+> Dernière mise à jour : **03 mai 2026** — Version courante : **v1.6.0**  
+> Suite de tests : **1 273 tests** (toutes catégories)  
 > Légende : ✅ Livré · ⚠️ Partiel · ❌ Non démarré  
 > Priorité : 🔴 Haute · 🟡 Moyenne · 🟢 Basse
 
@@ -14,7 +14,7 @@
 | S1 | 🔴 | **Authentification API Key** | ✅ Livré | v1.3.0 | Header `X-Api-Key` activable via `EMV_API_KEY`. Sans clé → mode dev sans auth. |
 | S2 | 🔴 | **Rate limiting** | ✅ Livré | v1.3.0 | `Flask-Limiter 4.1.1`. 300 req/min global, 30/min sur `/authorize`, 5/min batch. HTTP 429. |
 | S3 | 🟡 | **Masquage PAN dans les logs** | ✅ Livré | v1.0.0 | PAN masqué (`************NNNN`) dans toutes les réponses REST et journaux d'audit. |
-| S4 | 🟡 | **Validation stricte des entrées** | ⚠️ Partiel | — | Validations manuelles en place (PAN, amount, currency). Pydantic/marshmallow non intégrés. |
+| S4 | 🟡 | **Validation stricte des entrées** | ✅ Livré | v1.6.0 | Pydantic v2 intégré (`schemas.py`). 14 schémas (AuthorizeRequest, PreauthRequest, ChargebackRequest…). Validation PAN, amount, currency, MCC, CVV, field_55 hex. HTTP 422 avec détails. 57 tests. |
 | S5 | 🟡 | **Chiffrement données sensibles en RAM** | ❌ Non démarré | — | MDK et PAN stockés en clair en mémoire. HSM simulé non implémenté. |
 | S6 | 🟢 | **Journal d'audit immuable** | ✅ Livré | v1.4.0 | `Transaction.log_event()` enregistre chaque étape. Endpoint `GET /api/v1/transactions/<id>/log`. |
 
@@ -24,9 +24,9 @@
 
 | # | Priorité | Évolution | Statut | Version | Notes |
 |---|----------|-----------|--------|---------|-------|
-| P1 | 🔴 | **Base de données SQLite / PostgreSQL** | ❌ Non démarré | — | Données en RAM. SQLAlchemy + Alembic non intégrés. |
+| P1 | 🔴 | **Base de données SQLite / PostgreSQL** | ✅ Livré | v1.6.0 | SQLAlchemy 2.0 + Alembic. ORM complet (`CardORM`, `TransactionORM`, `PreAuthORM`, `ChargebackORM`, `BINBlacklistORM`, `WebhookLogORM`). Repositories DB (`DBCardDatabase`, `DBTransactionLog`). Activation conditionnelle via `DATABASE_URL` (fallback in-memory si absent). `docker-compose.yml` postgres:15. |
 | P2 | 🟡 | **Sauvegarde JSON périodique** | ✅ Livré | v1.3.0 | `persistence.py` : snapshot toutes les 120 s, sauvegarde SIGTERM, rechargement au démarrage. |
-| P3 | 🟡 | **Migrations de schéma** | ❌ Non démarré | — | Dépend de P1. Alembic non intégré. |
+| P3 | 🟡 | **Migrations de schéma** | ✅ Livré | v1.6.0 | Alembic intégré. Migration initiale `001_initial_schema.py`. `alembic upgrade head` automatique au démarrage si DATABASE_URL configurée. |
 | P4 | 🟢 | **Cache Redis** | ❌ Non démarré | — | Utile uniquement en déploiement multi-instances. |
 
 ---
@@ -66,7 +66,7 @@
 | D2 | 🟡 | **Export CSV** | ✅ Livré | v1.3.0 | `GET /api/v1/transactions/export` : CSV avec en-têtes métier complets. |
 | D3 | 🟡 | **Documentation Swagger / OpenAPI 3.0** | ✅ Livré | v1.5.0 | Spec OpenAPI 3.0 sur `GET /api/v1/openapi.json`. Swagger UI interactif sur `GET /api/docs`. 13 tags, tous les nouveaux endpoints documentés. |
 | D4 | 🟡 | **Simulation de scénarios batch** | ✅ Livré | v1.3.0 | `POST /api/v1/batch/simulate` : N transactions avec cartes et montants variés. |
-| D5 | 🟢 | **Alertes visuelles** | ❌ Non démarré | — | Notifications dashboard non implémentées. |
+| D5 | 🟢 | **Alertes visuelles** | ✅ Livré | v1.6.0 | `emv/alerts.py` : 7 types d'alertes (CONTACTLESS_CUMUL_HIGH, DAILY_LIMIT_APPROACHING, CARD_BLOCKED_HIGH, TRANSACTION_FAILURE_BURST, BIN_BLACKLIST_ACTIVITY, CHARGEBACK_SURGE, PREAUTH_EXPIRY_WARNING). Niveaux CRITICAL/WARNING/INFO. Endpoint `GET /api/v1/alerts`. Banner visuel CSS 3 couleurs. Polling JS 30 s. 23 tests. |
 | D6 | 🟢 | **Mode sombre / clair** | ✅ Livré | v1.3.0 | Toggle thème dans le dashboard (CSS variables + localStorage). |
 
 ---
@@ -79,7 +79,7 @@
 | A2 | 🟡 | **Mode dégradé simulé** | ❌ Non démarré | — | Injection d'erreurs réseau / timeouts aléatoires non implémentée. |
 | A3 | 🟡 | **Configuration YAML/TOML rechargeable** | ❌ Non démarré | — | Paramètres dans `config.py` via variables d'environnement. Rechargement à chaud non supporté. |
 | A4 | 🟢 | **Client Python CLI** | ✅ Livré | v1.3.0 | `cli.py` : envoi d'autorisations, consultation transactions et stats. |
-| A5 | 🟢 | **Tests unitaires et d'intégration** | ✅ Livré | v1.5.0 | **1 213 tests** dans 20 fichiers. Crypto, TLV, CB rules, tranches, REST, TCP, chargebacks, préauths, BIN blacklist, devises, issuer scripts, risk scoring, webhooks. Couverture > 90 %. |
+| A5 | 🟢 | **Tests unitaires et d'intégration** | ✅ Livré | v1.6.0 | **1 273 tests** dans 23 fichiers. Crypto, TLV, CB rules, tranches, REST, TCP, chargebacks, préauths, BIN blacklist, devises, issuer scripts, risk scoring, webhooks, schemas Pydantic, alertes D5, ORM SQLAlchemy. Couverture > 90 %. |
 | A6 | 🟢 | **Conteneurisation Docker** | ✅ Livré | v1.4.0 | `Dockerfile` multi-stage, `docker-compose.yml` avec ports 5000/8583, volume persistance, healthcheck. |
 
 ---
@@ -103,27 +103,27 @@
 
 | Axe | Livré | Partiel | Non démarré | Total |
 |-----|-------|---------|-------------|-------|
-| Sécurité | 4 | 1 | 1 | 6 |
-| Persistance | 1 | 0 | 3 | 4 |
+| Sécurité | 5 | 0 | 1 | 6 |
+| Persistance | 3 | 0 | 1 | 4 |
 | EMV | 6 | 0 | 2 | 8 |
 | GIE CB | 2 | 1 | 2 | 5 |
-| Dashboard | 5 | 0 | 1 | 6 |
+| Dashboard | 6 | 0 | 0 | 6 |
 | Architecture | 4 | 0 | 2 | 6 |
 | Hors roadmap | 8 | — | — | 8 |
-| **Total** | **30** | **2** | **11** | **43** |
+| **Total** | **34** | **1** | **8** | **43** |
 
 ---
 
-## Prochaines priorités recommandées (post v1.5.0)
+## Prochaines priorités recommandées (post v1.6.0)
 
 | Rang | # | Évolution | Justification |
 |------|---|-----------|---------------|
-| 1 | P1 | Base de données SQLite/PostgreSQL | Persistance fiable sans dépendre du snapshot JSON |
-| 2 | E2 | 3-D Secure 2.x | Obligatoire DSP2 pour transactions e-commerce |
-| 3 | S4 | Validation stricte (Pydantic) | Renforcer la robustesse des entrées API |
-| 4 | A2 | Mode dégradé simulé | Tester la résilience (chaos engineering) |
-| 5 | D5 | Alertes visuelles dashboard | Supervision temps réel cumul sans contact / quota |
+| 1 | E2 | 3-D Secure 2.x | Obligatoire DSP2 pour transactions e-commerce |
+| 2 | T003 | Repositories DB PreAuth/Chargeback/BINBlacklist/Webhook | Persistance complète (Card+Transaction déjà migrés) |
+| 3 | S5 | Chiffrement données sensibles en RAM | MDK et PAN actuellement en clair |
+| 4 | A2 | Mode dégradé simulé | Chaos engineering / résilience |
+| 5 | P4 | Cache Redis | Multi-instances et rate-limit distribué |
 
 ---
 
-*Roadmap initiée le 02/05/2026 — mise à jour le 03/05/2026 · v1.5.0*
+*Roadmap initiée le 02/05/2026 — mise à jour le 03/05/2026 · v1.6.0*

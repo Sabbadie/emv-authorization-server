@@ -81,6 +81,9 @@ class Config:
     SNAPSHOT_ENABLED  = os.getenv("SNAPSHOT_ENABLED", "true").lower() == "true"
     SNAPSHOT_INTERVAL = int(os.getenv("SNAPSHOT_INTERVAL_SECS", 120))
 
+    # P1 — Base de données PostgreSQL (laisser vide → mode mémoire)
+    DATABASE_URL = os.getenv("DATABASE_URL", "")
+
     # A1 — Webhooks sortants (laisser vide pour désactiver)
     WEBHOOK_URL = os.getenv("WEBHOOK_URL", "")
 
