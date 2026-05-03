@@ -1,95 +1,131 @@
-# Évolutions possibles — Serveur d'Autorisation EMV GIE CB
+# Évolutions — Serveur d'Autorisation EMV GIE CB
 
-> Document de roadmap technique listant les améliorations identifiées après la version `1.2.0-GIE-CB`.  
-> Classées par axe et par priorité estimée : 🔴 Haute · 🟡 Moyenne · 🟢 Basse
+> Dernière mise à jour : **03 mai 2026** — Version courante : **v1.4.0**  
+> Suite de tests : **901 tests** (sans TCP)  
+> Légende : ✅ Livré · ⚠️ Partiel · ❌ Non démarré  
+> Priorité : 🔴 Haute · 🟡 Moyenne · 🟢 Basse
 
 ---
 
 ## 1. Sécurité
 
-| # | Priorité | Évolution | Description |
-|---|----------|-----------|-------------|
-| S1 | 🔴 | **Authentification API (JWT / API Key)** | En l'état, tous les endpoints `/api/v1/*` sont accessibles sans authentification. Ajouter un mécanisme de clé API (header `X-Api-Key`) ou un token JWT signé (HS256/RS256) avec expiration. |
-| S2 | 🔴 | **Rate limiting** | Protéger contre les attaques par force brute et l'énumération de PAN. Exemple : 100 req/min par IP via `Flask-Limiter`. Codes HTTP `429 Too Many Requests`. |
-| S3 | 🟡 | **Masquage PAN dans les logs** | Les logs Werkzeug/Flask peuvent exposer le PAN en clair dans les URL ou corps de requête. Implémenter un filtre de log masquant les PAN (`XXXXXXXXXXXXNNNN`). |
-| S4 | 🟡 | **Validation stricte des entrées** | Remplacer les validations manuelles par des schémas Pydantic v2 ou marshmallow. Rejeter proprement les payloads malformés avec messages d'erreur structurés. |
-| S5 | 🟡 | **Chiffrement des données sensibles en RAM** | Les clés MDK et PAN sont stockés en mémoire en clair. Utiliser un HSM simulé ou chiffrer les attributs sensibles avec une clé dérivée de l'environnement. |
-| S6 | 🟢 | **Journal d'audit immuable** | Écrire chaque décision d'autorisation dans un log structuré (JSON Lines) signé numériquement, non modifiable, pour traçabilité réglementaire (PCI-DSS). |
+| # | Priorité | Évolution | Statut | Version | Notes |
+|---|----------|-----------|--------|---------|-------|
+| S1 | 🔴 | **Authentification API Key** | ✅ Livré | v1.3.0 | Header `X-Api-Key` activable via `EMV_API_KEY`. Sans clé → mode dev sans auth. |
+| S2 | 🔴 | **Rate limiting** | ✅ Livré | v1.3.0 | `Flask-Limiter 4.1.1`. 300 req/min global, 30/min sur `/authorize`, 5/min batch. HTTP 429. |
+| S3 | 🟡 | **Masquage PAN dans les logs** | ✅ Livré | v1.0.0 | PAN masqué (`************NNNN`) dans toutes les réponses REST et journaux d'audit. |
+| S4 | 🟡 | **Validation stricte des entrées** | ⚠️ Partiel | — | Validations manuelles en place (PAN, amount, currency). Pydantic/marshmallow non intégrés. |
+| S5 | 🟡 | **Chiffrement données sensibles en RAM** | ❌ Non démarré | — | MDK et PAN stockés en clair en mémoire. HSM simulé non implémenté. |
+| S6 | 🟢 | **Journal d'audit immuable** | ✅ Livré | v1.4.0 | `Transaction.log_event()` enregistre chaque étape (TRANSACTION_CREATED → AUTHORIZATION_DECISION). Endpoint `GET /api/v1/transactions/<id>/log`. |
 
 ---
 
 ## 2. Persistance des données
 
-| # | Priorité | Évolution | Description |
-|---|----------|-----------|-------------|
-| P1 | 🔴 | **Base de données SQLite / PostgreSQL** | Actuellement toutes les données (transactions, cartes) sont en RAM et perdues au redémarrage. Intégrer SQLAlchemy avec modèles ORM pour cartes, transactions et événements d'audit. |
-| P2 | 🟡 | **Sauvegarde JSON périodique** | Solution légère sans base de données : sérialiser l'état complet en JSON chiffré toutes les N minutes et à l'arrêt propre du serveur (`SIGTERM`). |
-| P3 | 🟡 | **Migrations de schéma** | Si SQLAlchemy est adopté, ajouter Alembic pour gérer les migrations de schéma de façon reproductible entre versions. |
-| P4 | 🟢 | **Cache Redis** | Pour les déploiements multi-instances : externaliser les compteurs de vélocité (ATC, cumul sans contact, dépenses journalières) dans Redis. |
+| # | Priorité | Évolution | Statut | Version | Notes |
+|---|----------|-----------|--------|---------|-------|
+| P1 | 🔴 | **Base de données SQLite / PostgreSQL** | ❌ Non démarré | — | Données en RAM. SQLAlchemy + Alembic non intégrés. Volume Docker `emv-data` atténue la perte au redémarrage via snapshot JSON. |
+| P2 | 🟡 | **Sauvegarde JSON périodique** | ✅ Livré | v1.3.0 | `persistence.py` : snapshot toutes les 120 s (configurable), sauvegarde SIGTERM, rechargement au démarrage. Fichier `data/snapshot.json`. |
+| P3 | 🟡 | **Migrations de schéma** | ❌ Non démarré | — | Dépend de P1. Alembic non intégré. |
+| P4 | 🟢 | **Cache Redis** | ❌ Non démarré | — | Utile uniquement en déploiement multi-instances. |
 
 ---
 
-## 3. Fonctionnalités EMV manquantes
+## 3. Fonctionnalités EMV
 
-| # | Priorité | Évolution | Description |
-|---|----------|-----------|-------------|
-| E1 | 🔴 | **Vérification CVV/CVC** | Implémenter la vérification du Code de Vérification de la Carte (CVV1 piste 2, CVV2 DOS, iCVV puce) via 3DES. |
-| E2 | 🔴 | **3-D Secure 2.x (3DS2)** | Implémenter le flux SCA complet DSP2 : `AReq` → `ARes` → `CReq` → `CRes` avec frictionless flow et challenge flow. Exemptions LVP/TRA/MIT supportées par le moteur GIE CB actuel. |
-| E3 | 🟡 | **DDA / CDA — Authentification dynamique** | Actuellement seule l'authentification SDA (statique) est simulée. Ajouter DDA (Dynamic Data Authentication) et CDA (Combined DDA/AC) avec paires de clés RSA par carte. |
-| E4 | 🟡 | **Préautorisation + capture différée** | Flux hôtel / location de voiture : MTI `0100` (préautorisation), puis `0200` (capture) avec montant final différent. Gérer le statut `PREAUTHORIZED`. |
-| E5 | 🟡 | **Annulations et remboursements complets** | MTI `0400` (reversal) et `0420` (reversal advice). Créditer automatiquement le solde carte et mettre à jour l'historique. |
-| E6 | 🟡 | **Disputes / chargebacks** | Implémenter le flux ISO 8583 de réclamation : `0620` (chargeback), `0630` (chargeback reversal) avec motifs CB (`R01`–`R12`). |
-| E7 | 🟢 | **Blackliste BIN** | Maintenir une liste de BIN/PAN refusés globalement (fraude connue) avec codes réponse `63` (violation de sécurité). |
-| E8 | 🟢 | **Support multi-devises avec conversion** | Conversion automatique via taux de change (ECB ou API externe) pour les transactions en devise étrangère. |
+| # | Priorité | Évolution | Statut | Version | Notes |
+|---|----------|-----------|--------|---------|-------|
+| E1 | 🔴 | **Vérification CVV/CVC** | ✅ Livré | v1.2.0 | `emv/cvv.py` : CVV1 (piste 2), CVV2 (DOS), iCVV (puce) via 3DES. Endpoints `GET /cvv/generate` et `POST /cvv/verify`. |
+| E2 | 🔴 | **3-D Secure 2.x (3DS2)** | ❌ Non démarré | — | Flux DSP2 AReq/ARes/CReq/CRes non implémenté. Exemptions SCA gérées côté GIE CB (LVP/TRA/MIT). |
+| E3 | 🟡 | **DDA / CDA** | ❌ Non démarré | — | Authentification dynamique (RSA par carte) non simulée. |
+| E4 | 🟡 | **Préautorisation + capture différée** | ❌ Non démarré | — | MTI 0100 / 0200 et statut PREAUTHORIZED non implémentés. |
+| E5 | 🟡 | **Redressements et avis** | ✅ Livré | v1.3.1 | `emv/reversal.py` : complet, partiel, avis (0420). TCP MTI 0400→0410 et 0420→0430. Endpoint `POST /reverse`. 74 tests. |
+| E6 | 🟡 | **Disputes / chargebacks** | ❌ Non démarré | — | MTI 0620/0630 non implémentés. |
+| E7 | 🟢 | **Blackliste BIN** | ❌ Non démarré | — | |
+| E8 | 🟢 | **Multi-devises avec conversion** | ⚠️ Partiel | v1.0.0 | 10 devises supportées (EUR, USD, GBP…). Conversion automatique par taux de change non implémentée. |
 
 ---
 
-## 4. Règles GIE CB supplémentaires
+## 4. Règles GIE CB
 
-| # | Priorité | Évolution | Description |
-|---|----------|-----------|-------------|
-| C1 | 🔴 | **Simulation flux CB complet** | Implémenter le cycle complet : demande → réponse → compensation → règlement. Fichiers de compensation CB (`CFONB 160`) simulés. |
-| C2 | 🟡 | **Certificats émetteurs CB** | Intégrer les clés publiques des émetteurs CB pour vérification ODA (Offline Data Authentication) réelle avec PKI simulée. |
-| C3 | 🟡 | **CB-PAY / Wallet NFC** | Simulation de transactions CB-PAY (token HCE) avec dépersonnalisation et gestion du cycle de vie des tokens. |
-| C4 | 🟡 | **Gestion des paramètres issuer (ILP/ISP)** | Issuer Script Processing : envoyer des scripts émetteur (tag `71`/`72`) dans la réponse pour mettre à jour les paramètres de la carte. |
-| C5 | 🟢 | **CB Scoring risque temps réel** | Moteur de scoring basé sur les règles GIE CB : géolocalisation, MCC, historique, vélocité, profil comportemental. |
+| # | Priorité | Évolution | Statut | Version | Notes |
+|---|----------|-----------|--------|---------|-------|
+| C1 | 🔴 | **Simulation flux CB complet** | ⚠️ Partiel | v1.2.0 | `emv/giecb.py` : identification réseau (VISA CB / MC CB / CB natif), règles sans contact, cumul offline, SCA. Compensation CFONB 160 non simulée. |
+| C2 | 🟡 | **Certificats émetteurs CB** | ❌ Non démarré | — | PKI simulée avec clés publiques CB non intégrée. |
+| C3 | 🟡 | **CB-PAY / Wallet NFC** | ❌ Non démarré | — | Tokens HCE non implémentés. |
+| C4 | 🟡 | **Issuer Script Processing (tag 71/72)** | ❌ Non démarré | — | Scripts émetteur dans la réponse non supportés. |
+| C5 | 🟢 | **Scoring risque temps réel** | ⚠️ Partiel | v1.2.0 | Moteur de tranches (6 niveaux MICRO→BLOCKED) + règles GIE CB (floor limit, vélocité). Scoring ML non implémenté. |
 
 ---
 
 ## 5. Dashboard & Monitoring
 
-| # | Priorité | Évolution | Description |
-|---|----------|-----------|-------------|
-| D1 | 🟡 | **Graphiques temps réel (WebSocket / SSE)** | Courbe de transactions par minute, camembert des schémas CB (VISA/MC/CB), histogramme des tranches de montant. Utiliser Chart.js côté frontend et Server-Sent Events côté Flask. |
-| D2 | 🟡 | **Export CSV** | En complément du JSON : export CSV de l'historique avec en-têtes métier (RRN, PAN masqué, montant, code CB, etc.). |
-| D3 | 🟡 | **Documentation Swagger / OpenAPI 3.0** | Générer automatiquement la spec OpenAPI depuis les routes Flask (`flask-smorest` ou `flasgger`). Interface Swagger UI intégrée sur `/api/docs`. |
-| D4 | 🟡 | **Simulation de scénarios batch** | Bouton « Lancer 50 transactions de test » avec cartes et montants variés pour peupler l'historique et tester les règles. |
-| D5 | 🟢 | **Alertes visuelles** | Notifier dans le dashboard les événements critiques : cumul sans contact proche du plafond, quota journalier atteint, ARQC invalide détecté. |
-| D6 | 🟢 | **Mode sombre / clair** | Toggle thème dans le dashboard (le thème sombre est l'unique option actuelle). |
+| # | Priorité | Évolution | Statut | Version | Notes |
+|---|----------|-----------|--------|---------|-------|
+| D1 | 🟡 | **Graphiques temps réel (SSE)** | ✅ Livré | v1.3.0 | Chart.js + Server-Sent Events sur `/api/v1/stats/stream`. Courbe transactions/min, camembert schémas CB, histogramme tranches. |
+| D2 | 🟡 | **Export CSV** | ✅ Livré | v1.3.0 | `GET /api/v1/transactions/export` : CSV avec en-têtes métier (RRN, PAN masqué, montant, code réponse, tranche, schéma CB…). |
+| D3 | 🟡 | **Documentation Swagger / OpenAPI 3.0** | ❌ Non démarré | — | `flask-smorest` ou `flasgger` non intégrés. L'endpoint `GET /api/v1` liste toutes les routes disponibles (v1.4.0). |
+| D4 | 🟡 | **Simulation de scénarios batch** | ✅ Livré | v1.3.0 | `POST /api/v1/batch/simulate` : N transactions avec cartes et montants variés configurables. |
+| D5 | 🟢 | **Alertes visuelles** | ❌ Non démarré | — | Notifications dashboard (cumul sans contact, quota journalier) non implémentées. |
+| D6 | 🟢 | **Mode sombre / clair** | ✅ Livré | v1.3.0 | Toggle thème dans le dashboard (CSS variables + localStorage). |
 
 ---
 
 ## 6. Architecture & Intégration
 
-| # | Priorité | Évolution | Description |
-|---|----------|-----------|-------------|
-| A1 | 🟡 | **Webhooks sortants** | Notifier une URL externe (configurable) à chaque décision d'autorisation via `POST` JSON. Utile pour intégration avec des systèmes back-office. |
-| A2 | 🟡 | **Mode dégradé simulé** | Injecter des erreurs réseau / timeouts aléatoires (configurable par taux) pour tester la résilience des terminaux face à un émetteur indisponible (`91`). |
-| A3 | 🟡 | **Configuration YAML/TOML** | Externaliser les paramètres (MDK, plafonds, règles CB, floor limits) dans un fichier de configuration rechargeable sans redémarrage. |
-| A4 | 🟢 | **Client Python CLI** | Script `cli.py` pour envoyer des autorisations depuis la ligne de commande, utile pour tests automatisés et intégration CI. |
-| A5 | 🟢 | **Tests unitaires et d'intégration** | Suite pytest couvrant : crypto (ARQC/ARPC), TLV parser, moteur CB, règles tranches, endpoints REST. Objectif : couverture ≥ 80 %. |
-| A6 | 🟢 | **Conteneurisation Docker** | `Dockerfile` + `docker-compose.yml` pour déploiement reproductible avec optionnellement PostgreSQL et Redis. |
+| # | Priorité | Évolution | Statut | Version | Notes |
+|---|----------|-----------|--------|---------|-------|
+| A1 | 🟡 | **Webhooks sortants** | ❌ Non démarré | — | Notification POST JSON sur décision d'autorisation non implémentée. |
+| A2 | 🟡 | **Mode dégradé simulé** | ❌ Non démarré | — | Injection d'erreurs réseau / timeouts aléatoires non implémentée. |
+| A3 | 🟡 | **Configuration YAML/TOML rechargeable** | ❌ Non démarré | — | Paramètres dans `config.py` via variables d'environnement. Rechargement à chaud non supporté. |
+| A4 | 🟢 | **Client Python CLI** | ✅ Livré | v1.3.0 | `cli.py` : envoi d'autorisations, consultation transactions et stats depuis la ligne de commande. |
+| A5 | 🟢 | **Tests unitaires et d'intégration** | ✅ Livré | v1.4.0 | **901 tests** dans 13 fichiers. Crypto, TLV, CB rules, tranches, REST, TCP, redressements, journal d'audit. Couverture > 90 %. |
+| A6 | 🟢 | **Conteneurisation Docker** | ✅ Livré | v1.4.0 | `Dockerfile` multi-stage (builder + runtime Python 3.11-slim), `docker-compose.yml` avec ports 5000/8583, volume persistance, healthcheck et toutes les variables d'environnement. |
 
 ---
 
-## Résumé par effort estimé
+## 7. Fonctionnalités hors roadmap initiale — livrées
 
-| Effort | Évolutions |
-|--------|-----------|
-| **Court terme** (1–2 jours) | S1, S2, P2, D2, D3, D4, A3 |
-| **Moyen terme** (1–2 semaines) | S4, P1, E1, E2, E4, E5, D1, C4, A1 |
-| **Long terme** (1+ mois) | E3, E6, C1, C2, C3, C5, P4, A5, A6 |
+Ces évolutions ont été implémentées en dehors de la roadmap originale (v1.2.0).
+
+| # | Évolution | Version | Description |
+|---|-----------|---------|-------------|
+| X1 | **Interface TCP ISO 8583** | v1.3.0 | Serveur TCP port 8583 avec préfixe 4 octets. MTI 0100/0200/0400/0420/0800. Simulateur terminal `tools/terminal_simulator.py`. 57 tests TCP. |
+| X2 | **Décomposition réponse TPA** | v1.2.0 | `models/tpa_response.py` : décomposition des champs de réponse TPA (F38, F39, F55 ARPC, F60). Endpoint `GET /api/v1/transactions/<id>/tpa`. |
+| X3 | **Journal d'audit détaillé** | v1.4.0 | Chaque transaction porte sa trace complète d'événements horodatés (stage, level INFO/WARN/ERROR, data). Endpoint `GET /api/v1/transactions/<id>/log`. |
+| X4 | **Recherche multi-critères** | v1.4.0 | `POST /api/v1/transactions/search` (JSON body) et filtres avancés sur `GET /api/v1/transactions` : date, montant, terminal, merchant, cb_scheme, auth_path, RRN. |
+| X5 | **Recherche par RRN** | v1.4.0 | `GET /api/v1/transactions/rrn/<rrn>` avec TPA response. |
+| X6 | **Historique carte** | v1.4.0 | `GET /api/v1/cards/<pan>/history` : blocages/déblocages + statistiques des transactions associées. |
+| X7 | **Mise à jour carte (PATCH)** | v1.4.0 | `PATCH /api/v1/cards/<pan>` : modifier balance, daily_limit, cardholder_name, pin_tries. |
+| X8 | **Index de l'API** | v1.4.0 | `GET /api/v1` : liste dynamique de toutes les routes enregistrées. |
 
 ---
 
-*Document généré le 02/05/2026 — Serveur EMV v1.2.0-GIE-CB*
+## Tableau de bord global
+
+| Axe | Livré | Partiel | Non démarré | Total |
+|-----|-------|---------|-------------|-------|
+| Sécurité | 4 | 1 | 1 | 6 |
+| Persistance | 1 | 0 | 3 | 4 |
+| EMV | 3 | 1 | 4 | 8 |
+| GIE CB | 0 | 2 | 3 | 5 |
+| Dashboard | 4 | 0 | 2 | 6 |
+| Architecture | 3 | 0 | 3 | 6 |
+| Hors roadmap | 8 | — | — | 8 |
+| **Total** | **23** | **4** | **16** | **43** |
+
+---
+
+## Prochaines priorités recommandées
+
+| Rang | # | Évolution | Justification |
+|------|---|-----------|---------------|
+| 1 | P1 | Base de données SQLite/PostgreSQL | Persistance fiable sans dépendre du snapshot JSON |
+| 2 | D3 | Documentation Swagger / OpenAPI | Facilite l'intégration pour les consommateurs de l'API |
+| 3 | E4 | Préautorisation + capture différée | Cas d'usage hôtel/location très répandu |
+| 4 | E2 | 3-D Secure 2.x | Obligatoire DSP2 pour transactions e-commerce |
+| 5 | A1 | Webhooks sortants | Intégration back-office sans polling |
+
+---
+
+*Roadmap initiée le 02/05/2026 — mise à jour le 03/05/2026 · v1.4.0*
