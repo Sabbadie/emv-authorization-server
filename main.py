@@ -1,8 +1,9 @@
 """
-EMV Authorization Server v1.9.0 — Entry Point — Roadmap 43/43 ✅
-Intègre : P1 (PostgreSQL/SQLAlchemy), P2 (backup JSON), P4 (Cache Redis),
-          S4 (Pydantic), S5 (HSM chiffrement RAM), D5 (Dashboard alertes),
-          C1 (flux CB complet), A2 (chaos engineering), A3 (config YAML/TOML)
+EMV Authorization Server v1.10.0 — Entry Point — Roadmap 43/43 ✅
+Intègre : P1 (PostgreSQL/SQLAlchemy), P2 (backup JSON + historique 7j + import DB),
+          P4 (Cache Redis), S4 (Pydantic), S5 (HSM chiffrement RAM),
+          D5 (Dashboard alertes), C1 (flux CB complet),
+          A2 (chaos engineering), A3 (config YAML/TOML)
 """
 
 import logging
@@ -18,11 +19,11 @@ logger = logging.getLogger(__name__)
 
 if __name__ == "__main__":
     logger.info("=" * 60)
-    logger.info("  Serveur d'Autorisation EMV v1.9.0 — Roadmap 43/43 ✅")
+    logger.info("  Serveur d'Autorisation EMV v1.10.0 — Roadmap 43/43 ✅")
     logger.info("  EMV 4.3 | ISO 8583 | ARQC/ARPC | GIE CB | CVV")
     logger.info("  S1:APIKey | S2:RateLimit | S3:PANMask | S4:Pydantic | S5:HSM")
     logger.info("  D1:Charts | D2:CSV | D4:Batch | D5:Alertes | D6:DarkMode")
-    logger.info("  E1:CVV | E2:3DS2 | E3:DDA/CDA | P1:PostgreSQL | P2:JSON | P4:Cache")
+    logger.info("  E1:CVV | E2:3DS2 | E3:DDA/CDA | P1:PostgreSQL | P2:JSON+7j+Import | P4:Cache")
     logger.info("  C1:FluxCB | C2:PKI | C3:HCE/NFC | A2:Chaos | A3:ConfigYAML")
     logger.info("=" * 60)
 

@@ -1,4 +1,4 @@
-# EMV Authorization Server — v1.9.0
+# EMV Authorization Server — v1.10.0
 
 Serveur d'autorisation EMV complet conforme aux normes EMV 4.3 et ISO 8583,
 développé en Python/Flask. Deux interfaces : REST HTTP (port 5000) et TCP ISO 8583
@@ -13,7 +13,8 @@ emv-auth-server/
 ├── config.py               # Configuration (clés, limites, ports, DATABASE_URL)
 ├── database.py             # SQLAlchemy engine/session, init_db, db_health
 ├── schemas.py              # Pydantic v2 — 14 schémas de validation (S4)
-├── persistence.py          # Backup/restore JSON (fallback in-memory)
+├── persistence.py          # Backup JSON + historique 7j + rotation (P2 v1.10.0)
+├── db_import.py            # Import JSON → DB, auto_recover (P2/P1 v1.10.0)
 ├── alembic.ini             # Configuration Alembic
 ├── alembic/
 │   ├── env.py              # Script d'environnement Alembic
@@ -62,7 +63,7 @@ emv-auth-server/
 ├── GUIDE_UTILISATEUR.md    # Guide utilisateur complet avec exemples curl
 ├── test_data/
 │   └── jeu_essai.json      # 7 cartes, 20 scénarios, 7 utilisateurs test
-└── tests/                  # 32 fichiers, 1609 tests
+└── tests/                  # 34 fichiers, 1644 tests
     ├── test_api.py               # Tests API REST
     ├── test_authorization.py     # Tests logique d'autorisation
     ├── test_schemas.py           # Tests Pydantic S4 (57 tests)

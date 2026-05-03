@@ -1,7 +1,7 @@
 # Évolutions — Serveur d'Autorisation EMV GIE CB
 
-> Dernière mise à jour : **03 mai 2026** — Version courante : **v1.9.0**  
-> Suite de tests : **1 609 tests** (toutes catégories)  
+> Dernière mise à jour : **03 mai 2026** — Version courante : **v1.10.0**  
+> Suite de tests : **1 644 tests** (toutes catégories)  
 > Légende : ✅ Livré · ⚠️ Partiel · ❌ Non démarré  
 > Priorité : 🔴 Haute · 🟡 Moyenne · 🟢 Basse
 
@@ -25,7 +25,7 @@
 | # | Priorité | Évolution | Statut | Version | Notes |
 |---|----------|-----------|--------|---------|-------|
 | P1 | 🔴 | **Base de données SQLite / PostgreSQL** | ✅ Livré | v1.6.0 | SQLAlchemy 2.0 + Alembic. ORM complet (`CardORM`, `TransactionORM`, `PreAuthORM`, `ChargebackORM`, `BINBlacklistORM`, `WebhookLogORM`). Repositories DB (`DBCardDatabase`, `DBTransactionLog`). Activation conditionnelle via `DATABASE_URL` (fallback in-memory si absent). `docker-compose.yml` postgres:15. |
-| P2 | 🟡 | **Sauvegarde JSON périodique** | ✅ Livré | v1.3.0 | `persistence.py` : snapshot toutes les 120 s, sauvegarde SIGTERM, rechargement au démarrage. |
+| P2 | 🟡 | **Sauvegarde JSON périodique + Historique 7 jours** | ✅ Livré | v1.3.0 → v1.10.0 | `persistence.py` : snapshot toutes les 120 s, sauvegarde SIGTERM, rechargement au démarrage. **v1.10.0** : snapshot horodaté dans `data/snapshots/`, rotation automatique (configurable `SNAPSHOT_RETENTION_DAYS`, défaut 7j), index JSON `data/snapshots/index.json` (métadonnées : taille, nb_cards, nb_txns). `db_import.py` : `import_snapshot_to_db(path, dry_run)` — upsert cartes + insert transactions (skip doublons). `auto_recover()` — réimport automatique au démarrage après reconnexion DB. Endpoints : `GET /api/v1/snapshot/history`, `GET /api/v1/snapshot/latest`, `POST /api/v1/snapshot/save`, `POST /api/v1/snapshot/restore`, `POST /api/v1/snapshot/import`, `POST /api/v1/snapshot/recover`, `GET /api/v1/snapshot/import-history`. 35 tests. |
 | P3 | 🟡 | **Migrations de schéma** | ✅ Livré | v1.6.0 | Alembic intégré. Migration initiale `001_initial_schema.py`. `alembic upgrade head` automatique au démarrage si DATABASE_URL configurée. |
 | P4 | 🟢 | **Cache Redis** | ✅ Livré | v1.9.0 | `cache.py` : `CacheManager` singleton. Backend Redis (redis-py) si `REDIS_URL` configuré, sinon `InMemoryBackend` avec TTL intégré. API identique dans les deux cas. Utilisations : stats globales (TTL 5s), sessions 3DS2 (TTL 10min), lookup token→PAN_hash (TTL 1h). Fallback automatique si Redis indisponible. Endpoints : `GET /api/v1/cache/stats`, `DELETE /api/v1/cache/flush?prefix=`. 30 tests. |
 

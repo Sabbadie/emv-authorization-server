@@ -64,6 +64,10 @@ from emv.giecb import (check_mcc_restriction, check_velocity, check_cb_routing,
                         CB_VELOCITY_LIMITS, CB_DECLINE_REASONS, CB_PIN_RULES)
 from emv.hsm import get_hsm, SimulatedHSM
 from cache import get_cache, CacheManager
+from persistence import (list_snapshots, get_latest_snapshot_path,
+                          load_snapshot, save_snapshot, SNAPSHOT_FILE,
+                          SNAPSHOT_DIR, SNAPSHOT_RETENTION)
+from db_import import import_snapshot_to_db, auto_recover, get_import_history
 
 # ── S3 : Masquage PAN dans les logs ─────────────────────────────────────────
 _PAN_RE = re.compile(r'\b([3-6]\d{5})\d{6,10}(\d{4})\b')
@@ -3289,6 +3293,111 @@ def cache_flush():
         "flushed": count,
         "prefix": prefix or "(all)",
         "message": "{} entrée(s) supprimée(s)".format(count),
+    }), 200
+
+
+# ═══════════════════════════════════════════════════════════════════════════
+# P2 v1.10.0 — Historique JSON 7 jours + Import JSON → DB
+# ═══════════════════════════════════════════════════════════════════════════
+
+@app.route("/api/v1/snapshot/history", methods=["GET"])
+def snapshot_history():
+    """P2 — Liste les snapshots disponibles (historique 7 jours)."""
+    entries = list_snapshots()
+    return jsonify({
+        "count":            len(entries),
+        "retention_days":   SNAPSHOT_RETENTION,
+        "snapshot_dir":     SNAPSHOT_DIR,
+        "current_snapshot": SNAPSHOT_FILE,
+        "snapshots":        entries,
+    }), 200
+
+
+@app.route("/api/v1/snapshot/latest", methods=["GET"])
+def snapshot_latest():
+    """P2 — Retourne les métadonnées du snapshot le plus récent."""
+    entries = list_snapshots()
+    if not entries:
+        return jsonify({"error": "Aucun snapshot disponible"}), 404
+    latest = entries[0]
+    return jsonify(latest), 200
+
+
+@app.route("/api/v1/snapshot/restore", methods=["POST"])
+def snapshot_restore():
+    """
+    P2 — Restaure l'état mémoire depuis un snapshot JSON.
+    Body optionnel : {"path": "data/snapshots/snapshot_YYYYMMDD_HHMMSS.json"}
+    Sans body : utilise le snapshot courant (data/snapshot.json).
+    """
+    body = request.get_json(silent=True) or {}
+    path = body.get("path")
+    ok = load_snapshot(card_db, transaction_log, path=path)
+    if ok:
+        return jsonify({
+            "success": True,
+            "message": "État restauré depuis {}".format(path or SNAPSHOT_FILE),
+        }), 200
+    return jsonify({
+        "success": False,
+        "error":   "Échec restauration — snapshot introuvable ou corrompu",
+        "path":    path or SNAPSHOT_FILE,
+    }), 500
+
+
+@app.route("/api/v1/snapshot/save", methods=["POST"])
+def snapshot_save_now():
+    """P2 — Force une sauvegarde snapshot immédiate (hors cycle périodique)."""
+    ok = save_snapshot(card_db, transaction_log)
+    if ok:
+        entries = list_snapshots()
+        latest  = entries[0] if entries else None
+        return jsonify({
+            "success":  True,
+            "message":  "Snapshot sauvegardé",
+            "latest":   latest,
+        }), 200
+    return jsonify({"success": False, "error": "Échec sauvegarde snapshot"}), 500
+
+
+@app.route("/api/v1/snapshot/import", methods=["POST"])
+def snapshot_import_to_db():
+    """
+    P2/P1 — Importe un snapshot JSON dans la base de données.
+    Body : {"path": "data/snapshots/snapshot_YYYYMMDD_HHMMSS.json",
+            "dry_run": false}
+    dry_run=true : simule sans écrire dans la DB.
+    """
+    body    = request.get_json(silent=True) or {}
+    path    = body.get("path") or get_latest_snapshot_path()
+    dry_run = bool(body.get("dry_run", False))
+
+    if not path:
+        return jsonify({"error": "Aucun snapshot spécifié et aucun snapshot disponible"}), 400
+
+    result = import_snapshot_to_db(path, dry_run=dry_run)
+    status = 200 if result["success"] else 500
+    return jsonify(result), status
+
+
+@app.route("/api/v1/snapshot/recover", methods=["POST"])
+def snapshot_auto_recover():
+    """
+    P2/P1 — Récupération automatique DB depuis le dernier snapshot disponible.
+    À appeler après reconnexion DB pour réimporter les données perdues.
+    """
+    result = auto_recover()
+    status = 200 if result.get("success") else 500
+    return jsonify(result), status
+
+
+@app.route("/api/v1/snapshot/import-history", methods=["GET"])
+def snapshot_import_history():
+    """P2/P1 — Liste les snapshots disponibles pour import avec métadonnées."""
+    entries = get_import_history()
+    return jsonify({
+        "count":   len(entries),
+        "entries": entries,
     }), 200
 
 
