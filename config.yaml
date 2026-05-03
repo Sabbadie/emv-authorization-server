@@ -1,0 +1,52 @@
+server:
+  host: "0.0.0.0"
+  port: 5000
+  debug: false
+
+tcp:
+  enabled: true
+  host: "0.0.0.0"
+  port: 8583
+
+auth:
+  api_key: ""
+  rate_limit_default: "300 per minute"
+  rate_limit_authorize: "30 per minute"
+  rate_limit_batch: "5 per minute"
+
+emv:
+  max_transaction_amount: 1000000
+  daily_limit: 500000
+  atc_max_replay_window: 10
+
+cb:
+  referral_threshold: 500000
+  high_value_threshold: 100000
+  contactless_single_limit: 5000
+  contactless_cumul_limit: 15000
+  max_consecutive_offline: 5
+  low_value_threshold: 3000
+
+velocity:
+  max_txn_per_30min: 10
+  max_txn_per_hour: 15
+  max_amount_per_hour: 200000
+  max_refund_per_day: 3
+
+persistence:
+  snapshot_enabled: true
+  snapshot_interval_secs: 120
+
+webhooks:
+  url: ""
+
+chaos:
+  enabled: false
+  failure_rate: 0.1
+  latency_ms: 0
+  failure_types:
+    - "INTERNAL_ERROR"
+
+logging:
+  level: "INFO"
+  format: "%(asctime)s [%(levelname)s] %(name)s: %(message)s"

@@ -1,4 +1,4 @@
-# EMV Authorization Server — v1.7.0
+# EMV Authorization Server — v1.8.0
 
 Serveur d'autorisation EMV complet conforme aux normes EMV 4.3 et ISO 8583,
 développé en Python/Flask. Deux interfaces : REST HTTP (port 5000) et TCP ISO 8583
@@ -41,7 +41,10 @@ emv-auth-server/
 │   ├── pki.py              # PKI simulée CA→Issuer→ICC RSA 1024-bit (C2)
 │   ├── dda_cda.py          # DDA/CDA authentification offline RSA (E3)
 │   ├── tokenization.py     # Token HCE/NFC CB-PAY — Token Vault (C3)
+│   ├── degraded.py         # Mode dégradé / Chaos Engineering (A2)
 │   └── tcp_server.py       # Serveur TCP ISO 8583 (port 8583)
+├── config_loader.py        # Config YAML/TOML rechargeable à chaud (A3)
+├── config.yaml             # Fichier de configuration par défaut (A3)
 ├── iso8583/
 │   └── message.py          # Messages ISO 8583
 ├── models/
@@ -53,7 +56,7 @@ emv-auth-server/
 │   └── tpa_response.py     # Décomposition réponse TPA
 ├── tools/
 │   └── terminal_simulator.py  # Client TCP simulateur terminal
-└── tests/                  # 27 fichiers, 1404 tests
+└── tests/                  # 30 fichiers, 1536 tests
     ├── test_api.py               # Tests API REST
     ├── test_authorization.py     # Tests logique d'autorisation
     ├── test_schemas.py           # Tests Pydantic S4 (57 tests)
@@ -63,6 +66,9 @@ emv-auth-server/
     ├── test_tokenization.py      # Tests tokenisation HCE C3 (56 tests)
     ├── test_pki.py               # Tests PKI C2 (25 tests)
     ├── test_dda_cda.py           # Tests DDA/CDA E3 (34 tests)
+    ├── test_cb_flux.py           # Tests flux CB complet C1 (45 tests)
+    ├── test_degraded.py          # Tests chaos mode A2 (35 tests)
+    ├── test_config_loader.py     # Tests config YAML/TOML A3 (25 tests)
     ├── test_transaction_log.py   # Tests journal d'audit
     ├── test_reversal.py          # Tests redressements (74 tests)
     ├── test_tcp_server.py        # Tests interface TCP
@@ -176,21 +182,19 @@ Protocole : préfixe 4 octets big-endian + corps JSON UTF-8.
 | `API_KEY` | _(vide)_ | Clé API (header `X-API-Key`) |
 | `FLASK_ENV` | `production` | Environnement Flask |
 
-## Nouvelles fonctionnalités v1.7.0
+## Nouvelles fonctionnalités v1.8.0
 
 | Feature | Module | Endpoints REST |
 |---------|--------|---------------|
-| **E2 — 3DS2** | `emv/threeds.py` | `POST /api/v1/3ds/authenticate` · `POST /api/v1/3ds/<id>/challenge` · `GET /api/v1/3ds/<id>` · `GET /api/v1/3ds` · `GET /api/v1/3ds/stats` |
-| **C2 — PKI CB** | `emv/pki.py` | `GET /api/v1/pki/<pan>` · `GET /api/v1/pki/status` |
-| **E3 — DDA/CDA** | `emv/dda_cda.py` | `POST /api/v1/dda/sign` · `POST /api/v1/dda/verify` · `POST /api/v1/cda/sign` · `POST /api/v1/cda/verify` |
-| **C3 — HCE/NFC** | `emv/tokenization.py` | `POST /api/v1/tokens` · `GET /api/v1/tokens` · `GET /api/v1/tokens/<id>` · `POST /api/v1/tokens/<id>/suspend` · `POST /api/v1/tokens/<id>/resume` · `DELETE /api/v1/tokens/<id>` · `GET /api/v1/tokens/pan/<pan>` · `GET /api/v1/tokens/stats` |
+| **C1 — Flux CB complet** | `emv/giecb.py` | `POST /api/v1/cb/routing` · `POST /api/v1/cb/velocity` · `POST /api/v1/cb/mcc-check` · `POST /api/v1/cb/pin-status` · `GET /api/v1/cb/service-indicators` |
+| **A2 — Chaos / Mode dégradé** | `emv/degraded.py` | `GET /api/v1/chaos` · `POST /api/v1/chaos/enable` · `POST /api/v1/chaos/disable` · `POST /api/v1/chaos/reset` · `POST /api/v1/chaos/endpoint` · `DELETE /api/v1/chaos/endpoint/<tag>` · `GET /api/v1/chaos/stats` |
+| **A3 — Config YAML/TOML** | `config_loader.py` + `config.yaml` | `GET /api/v1/config` · `POST /api/v1/config/reload` · `GET /api/v1/config/status` |
 
 ## Lancer les tests
 
 ```bash
-python -m pytest tests/ -q              # 1404 tests, ~18 s
-python -m pytest tests/test_threeds.py       # 3DS2 E2 (44 tests)
-python -m pytest tests/test_tokenization.py  # Tokenisation C3 (56 tests)
-python -m pytest tests/test_pki.py           # PKI CB C2 (25 tests)
-python -m pytest tests/test_dda_cda.py       # DDA/CDA E3 (34 tests)
+python -m pytest tests/ -q                   # 1536 tests, ~22 s
+python -m pytest tests/test_cb_flux.py        # Flux CB complet C1 (45 tests)
+python -m pytest tests/test_degraded.py       # Chaos mode A2 (35 tests)
+python -m pytest tests/test_config_loader.py  # Config YAML/TOML A3 (25 tests)
 ```

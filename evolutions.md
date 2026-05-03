@@ -1,7 +1,7 @@
 # Évolutions — Serveur d'Autorisation EMV GIE CB
 
-> Dernière mise à jour : **03 mai 2026** — Version courante : **v1.7.0**  
-> Suite de tests : **1 404 tests** (toutes catégories)  
+> Dernière mise à jour : **03 mai 2026** — Version courante : **v1.8.0**  
+> Suite de tests : **1 536 tests** (toutes catégories)  
 > Légende : ✅ Livré · ⚠️ Partiel · ❌ Non démarré  
 > Priorité : 🔴 Haute · 🟡 Moyenne · 🟢 Basse
 
@@ -50,7 +50,7 @@
 
 | # | Priorité | Évolution | Statut | Version | Notes |
 |---|----------|-----------|--------|---------|-------|
-| C1 | 🔴 | **Simulation flux CB complet** | ⚠️ Partiel | v1.2.0 | `emv/giecb.py` : identification réseau, règles sans contact, cumul offline, SCA. |
+| C1 | 🔴 | **Simulation flux CB complet** | ✅ Livré | v1.8.0 | `emv/giecb.py` complété : vélocité (fenêtre 30min/1h/jour), MCC bloqués (jeux/adult/crypto), routage domestique CB prioritaire (pays 250/FRA/FR/DOM-TOM), statut PIN (blocage à 0 tentative), règles remboursement (ratio 100%), intégration résultat 3DS2 ECI (05/06/07), indicateurs de service complets (01–12) par contexte. Nouveaux endpoints : `POST /api/v1/cb/routing`, `POST /api/v1/cb/velocity`, `POST /api/v1/cb/mcc-check`, `POST /api/v1/cb/pin-status`, `GET /api/v1/cb/service-indicators`. 45 tests. |
 | C2 | 🟡 | **Certificats émetteurs CB** | ✅ Livré | v1.7.0 | `emv/pki.py` : PKI simulée hiérarchie CA Root → Issuer (par premier chiffre BIN) → ICC (par PAN). RSA 1024-bit via `cryptography`. Tags EMV : `0x8F` (CA PK Index), `0x90` (Issuer PK Cert), `0x9F32` (Issuer PK Exponent), `0x9F46` (ICC PK Cert), `0x9F47` (ICC PK Exponent). Clés mises en cache (lazy init). Endpoints : `GET /api/v1/pki/<pan>`, `GET /api/v1/pki/status`. 25 tests. |
 | C3 | 🟡 | **CB-PAY / Wallet NFC** | ✅ Livré | v1.7.0 | `emv/tokenization.py` : Token Service Provider simulé. Token HCE format PAN LUHN-valide, préfixe 4999. Token Vault en mémoire PAN↔Token (hash SHA-256). Domaines : HCE_MOBILE, ECOMMERCE, WALLET, ANY. Cycle de vie ACTIVE→SUSPENDED→DELETED. Détokenisation transparente dans `authorize()` step 0 (avant blacklist). Compteur d'utilisations (max_uses). Endpoints CRUD : `POST /api/v1/tokens`, `GET /api/v1/tokens`, `GET /api/v1/tokens/<id>`, `POST /api/v1/tokens/<id>/suspend`, `POST /api/v1/tokens/<id>/resume`, `DELETE /api/v1/tokens/<id>`, `GET /api/v1/tokens/pan/<pan>`, `GET /api/v1/tokens/stats`. 56 tests. |
 | C4 | 🟡 | **Issuer Script Processing (tag 71/72)** | ✅ Livré | v1.5.0 | `emv/issuer_scripts.py` : génération Tag 71 (avant transaction) / Tag 72 (après). UNBLOCK_PIN, UPDATE_RISK_PARAMS, PUT_DATA. Export hex + base64. 26 tests. |
@@ -76,10 +76,10 @@
 | # | Priorité | Évolution | Statut | Version | Notes |
 |---|----------|-----------|--------|---------|-------|
 | A1 | 🟡 | **Webhooks sortants** | ✅ Livré | v1.5.0 | `emv/webhooks.py` : POST JSON asynchrone (thread daemon). 8 types d'événements. Journal 200 entrées. `WEBHOOK_URL` env var. Endpoints CRUD. 35 tests. |
-| A2 | 🟡 | **Mode dégradé simulé** | ❌ Non démarré | — | Injection d'erreurs réseau / timeouts aléatoires non implémentée. |
-| A3 | 🟡 | **Configuration YAML/TOML rechargeable** | ❌ Non démarré | — | Paramètres dans `config.py` via variables d'environnement. Rechargement à chaud non supporté. |
+| A2 | 🟡 | **Mode dégradé simulé** | ✅ Livré | v1.8.0 | `emv/degraded.py` : `DegradedModeManager` singleton thread-safe. 5 types de pannes : TIMEOUT, NETWORK_ERROR, INTERNAL_ERROR, PARTIAL_FAILURE, SLOW_RESPONSE. Taux configurable (0–100%), latence injectée (ms + jitter). Config globale ou par endpoint. Middleware Flask `@before_request` (bypass `/api/v1/chaos`). Endpoints : `GET /api/v1/chaos`, `POST /api/v1/chaos/enable`, `POST /api/v1/chaos/disable`, `POST /api/v1/chaos/reset`, `POST /api/v1/chaos/endpoint`, `DELETE /api/v1/chaos/endpoint/<tag>`, `GET /api/v1/chaos/stats`. 35 tests. |
+| A3 | 🟡 | **Configuration YAML/TOML rechargeable** | ✅ Livré | v1.8.0 | `config_loader.py` : `ConfigManager` singleton. Charge `config.yaml` (PyYAML) ou `config.toml` (tomllib Python 3.11). Fusion profonde avec surcharge par variables d'environnement (`SEC__KEY` → `cfg.sec.key`). Hot-reload par thread de polling (10s). `config.yaml` par défaut inclus (11 sections). Endpoints : `GET /api/v1/config`, `POST /api/v1/config/reload`, `GET /api/v1/config/status`. 25 tests. |
 | A4 | 🟢 | **Client Python CLI** | ✅ Livré | v1.3.0 | `cli.py` : envoi d'autorisations, consultation transactions et stats. |
-| A5 | 🟢 | **Tests unitaires et d'intégration** | ✅ Livré | v1.7.0 | **1 404 tests** dans 27 fichiers. Crypto, TLV, CB rules, tranches, REST, TCP, chargebacks, préauths, BIN blacklist, devises, issuer scripts, risk scoring, webhooks, schemas Pydantic, alertes D5, ORM SQLAlchemy, 3DS2 (44), tokenisation (56), PKI (25), DDA/CDA (34). Couverture > 90 %. |
+| A5 | 🟢 | **Tests unitaires et d'intégration** | ✅ Livré | v1.8.0 | **1 536 tests** dans 30 fichiers. Crypto, TLV, CB rules, tranches, REST, TCP, chargebacks, préauths, BIN blacklist, devises, issuer scripts, risk scoring, webhooks, schemas Pydantic, alertes D5, ORM SQLAlchemy, 3DS2 (44), tokenisation (56), PKI (25), DDA/CDA (34), flux CB complet (45), mode dégradé (35), config loader (25). Couverture > 90 %. |
 | A6 | 🟢 | **Conteneurisation Docker** | ✅ Livré | v1.4.0 | `Dockerfile` multi-stage, `docker-compose.yml` avec ports 5000/8583, volume persistance, healthcheck. |
 
 ---
@@ -106,11 +106,11 @@
 | Sécurité | 5 | 0 | 1 | 6 |
 | Persistance | 3 | 0 | 1 | 4 |
 | EMV | 8 | 0 | 0 | 8 |
-| GIE CB | 4 | 1 | 0 | 5 |
+| GIE CB | 5 | 0 | 0 | 5 |
 | Dashboard | 6 | 0 | 0 | 6 |
-| Architecture | 4 | 0 | 2 | 6 |
+| Architecture | 6 | 0 | 0 | 6 |
 | Hors roadmap | 8 | — | — | 8 |
-| **Total** | **38** | **1** | **4** | **43** |
+| **Total** | **41** | **0** | **2** | **43** |
 
 ---
 
@@ -126,4 +126,4 @@
 
 ---
 
-*Roadmap initiée le 02/05/2026 — mise à jour le 03/05/2026 · v1.7.0*
+*Roadmap initiée le 02/05/2026 — mise à jour le 03/05/2026 · v1.8.0*

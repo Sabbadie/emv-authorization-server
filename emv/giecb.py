@@ -8,10 +8,17 @@ Implémente les règles d'autorisation spécifiques au réseau CB français :
 - CAP/TAP (paramètres d'acceptation CB)
 - Codes réponse CB
 - Indicateurs de service CB
+- Vélocité par carte (fenêtre glissante)
+- MCC bloqués (jeux, contenus adultes, etc.)
+- Routage domestique CB prioritaire sur VISA/MC
+- Intégration résultat 3DS2 (ECI)
+- Contrôle PIN (tentatives restantes)
+- Règles remboursement / retrait / récurrent
 """
 
 import logging
 from dataclasses import dataclass, field
+from datetime import datetime, timezone
 from typing import Optional, List, Dict
 
 logger = logging.getLogger(__name__)
@@ -49,44 +56,42 @@ CB_BIN_RANGES = [
 ]
 
 # ── Floor limits CB par MCC ────────────────────────────────────────────────────
-# Montants en centimes d'euro (transaction en dessous = hors ligne OK sans ARQC)
 CB_MCC_FLOOR_LIMITS: Dict[str, int] = {
-    "5411": 3000,   # Supermarchés / épiceries
-    "5412": 3000,   # Supermarchés convenience
-    "5541": 0,      # Stations service — toujours en ligne
-    "5542": 0,      # Stations service automatiques — toujours en ligne
-    "5912": 5000,   # Pharmacies
-    "5812": 5000,   # Restaurants
-    "5813": 3000,   # Bars / tabacs
-    "5814": 3000,   # Fast-food
-    "5999": 3000,   # Divers détail
-    "7011": 0,      # Hôtels — toujours en ligne
-    "7996": 3000,   # Parcs d'attractions
-    "4111": 5000,   # Transport local
-    "4112": 5000,   # Trains
-    "4121": 5000,   # Taxis
-    "4131": 5000,   # Bus
-    "4784": 5000,   # Péages
+    "5411": 3000,
+    "5412": 3000,
+    "5541": 0,
+    "5542": 0,
+    "5912": 5000,
+    "5812": 5000,
+    "5813": 3000,
+    "5814": 3000,
     "5999": 3000,
+    "7011": 0,
+    "7996": 3000,
+    "4111": 5000,
+    "4112": 5000,
+    "4121": 5000,
+    "4131": 5000,
+    "4784": 5000,
     "DEFAULT": 3000,
 }
 
 # ── Paramètres sans contact CB (NFC / Contactless) ───────────────────────────
 CB_CONTACTLESS = {
-    "single_txn_limit":          5000,   # 50,00€ — plafond par transaction sans contact
-    "single_txn_limit_no_pin":   5000,   # 50,00€ — sans PIN (DSP2 low value)
-    "cumulative_offline_limit":  15000,  # 150,00€ — cumul hors ligne
-    "max_consecutive_offline":   5,      # Nb max transactions hors ligne consécutives
-    "low_value_threshold":       3000,   # 30,00€ — seuil micro-paiement SCA
+    "single_txn_limit":          5000,
+    "single_txn_limit_no_pin":   5000,
+    "cumulative_offline_limit":  15000,
+    "max_consecutive_offline":   5,
+    "low_value_threshold":       3000,
 }
 
 # ── Plafonds CB CAP (Card Acceptor Parameters) ────────────────────────────────
 CB_CAP = {
-    "offline_floor_limit":       3000,   # 30,00€
-    "max_offline_amount":        20000,  # 200,00€
-    "max_online_amount":         500000, # 5 000,00€
-    "referral_threshold":        500000, # > 5 000,00€ → référer
-    "high_value_threshold":      100000, # 1 000,00€
+    "offline_floor_limit":       3000,
+    "max_offline_amount":        20000,
+    "max_online_amount":         500000,
+    "referral_threshold":        500000,
+    "high_value_threshold":      100000,
 }
 
 # ── Paramètres CB TAP (Terminal Application Parameters) ──────────────────────
@@ -164,6 +169,9 @@ CB_DECLINE_REASONS = {
     "R10": "Transaction hors zone géographique autorisée",
     "R11": "Type de transaction non autorisé pour cette carte",
     "R12": "Commerçant non autorisé (MCC restreint)",
+    "R13": "Vélocité dépassée — trop de transactions en peu de temps",
+    "R14": "PIN bloqué — nombre de tentatives dépassé",
+    "R15": "Remboursement non autorisé — montant supérieur à l'original",
 }
 
 # ── Exemptions SCA (DSP2) CB ──────────────────────────────────────────────────
@@ -174,6 +182,38 @@ CB_SCA_EXEMPTIONS = [
     {"code": "TTP",  "name": "Trusted Third Party",    "max_amount": None,  "description": "Bénéficiaire de confiance"},
     {"code": "NONE", "name": "Aucune exemption",       "max_amount": None,  "description": "SCA complète requise"},
 ]
+
+# ── MCC bloqués (C1) ─────────────────────────────────────────────────────────
+# Catégories refusées par défaut sur le réseau CB (paramétrable par l'émetteur)
+CB_BLOCKED_MCCS: Dict[str, str] = {
+    "7995": "Jeux d'argent / Paris sportifs",
+    "5967": "Contenu adulte / services téléphoniques",
+    "7801": "Casinos en ligne",
+    "7802": "Casinos hors ligne (régulé)",
+    "9754": "Loteries d'état (restreint)",
+    "6051": "Crypto-actifs / monnaies virtuelles",
+    "6211": "Instruments financiers / spéculation",
+}
+
+# ── Règles vélocité CB (fenêtre glissante) ────────────────────────────────────
+CB_VELOCITY_LIMITS = {
+    "max_txn_per_30min":   10,   # max 10 transactions sur 30 minutes
+    "max_txn_per_hour":    15,   # max 15 transactions sur 60 minutes
+    "max_amount_per_hour": 200000,  # 2 000 € / heure (en centimes)
+    "max_refund_per_day":  3,    # max 3 remboursements par jour
+    "max_refund_amount_ratio": 1.0,  # remboursement ≤ 100 % du montant original
+}
+
+# ── Règles PIN CB ─────────────────────────────────────────────────────────────
+CB_PIN_RULES = {
+    "max_tries": 3,           # 3 tentatives PIN avant blocage
+    "block_on_zero": True,    # Bloquer si tries_remaining == 0
+}
+
+# ── Pays domestiques CB (routage prioritaire) ─────────────────────────────────
+CB_DOMESTIC_COUNTRIES = {"250", "FRA", "FR"}  # France métropolitaine + DOM-TOM
+CB_OVERSEAS_TERRITORIES = {"GP", "MQ", "GF", "RE", "YT", "PM", "MF", "BL",
+                            "NC", "PF", "WF", "TF"}
 
 
 @dataclass
@@ -206,6 +246,10 @@ class CBAuthResult:
     tap_params: dict
     warnings: List[str] = field(default_factory=list)
     cb_decline_reason: Optional[str] = None
+    velocity_check: str = "N/A"
+    routing_info: str = "N/A"
+    threeds_result: Optional[str] = None
+    pin_check: Optional[str] = None
 
     def to_dict(self):
         return {
@@ -223,6 +267,10 @@ class CBAuthResult:
             "tap_params": self.tap_params,
             "warnings": self.warnings,
             "cb_decline_reason": self.cb_decline_reason,
+            "velocity_check": self.velocity_check,
+            "routing_info": self.routing_info,
+            "threeds_result": self.threeds_result,
+            "pin_check": self.pin_check,
         }
 
 
@@ -299,7 +347,7 @@ def check_contactless(amount: int, contactless_cumul: int,
                        consecutive_offline: int) -> tuple:
     """
     Vérifie les règles sans contact CB.
-    Retourne (allowed, message, new_status)
+    Retourne (allowed, code, message)
     """
     cl = CB_CONTACTLESS
 
@@ -316,14 +364,215 @@ def check_contactless(amount: int, contactless_cumul: int,
     return True, "00", "Contactless OK"
 
 
+# ── C1 : Nouvelles fonctions flux CB complet ─────────────────────────────────
+
+def check_mcc_restriction(mcc: Optional[str]) -> tuple:
+    """
+    Vérifie si le MCC est bloqué sur le réseau CB.
+    Retourne (allowed, reason_code, message)
+    """
+    if not mcc:
+        return True, None, "MCC non spécifié — autorisé par défaut"
+    if mcc in CB_BLOCKED_MCCS:
+        return False, "R12", "MCC {} bloqué : {}".format(mcc, CB_BLOCKED_MCCS[mcc])
+    return True, None, "MCC {} autorisé".format(mcc)
+
+
+def check_velocity(recent_transactions: Optional[List[dict]],
+                   current_amount: int,
+                   transaction_type: str) -> tuple:
+    """
+    Vérifie les règles de vélocité CB (fenêtre glissante).
+    recent_transactions : liste de dicts avec clés 'timestamp' (ISO-8601 str ou datetime),
+                          'amount' (int centimes), 'type' (str).
+    Retourne (allowed, reason_code, message, stats)
+    """
+    if not recent_transactions:
+        return True, None, "Vélocité OK (aucun historique)", {}
+
+    now = datetime.now(timezone.utc)
+    txns_30min, txns_1h, amount_1h, refunds_today = [], [], 0, 0
+
+    for t in recent_transactions:
+        ts = t.get("timestamp")
+        if ts is None:
+            continue
+        if isinstance(ts, str):
+            try:
+                ts = datetime.fromisoformat(ts.replace("Z", "+00:00"))
+            except ValueError:
+                continue
+        if ts.tzinfo is None:
+            ts = ts.replace(tzinfo=timezone.utc)
+
+        age_secs = (now - ts).total_seconds()
+        if age_secs <= 1800:
+            txns_30min.append(t)
+        if age_secs <= 3600:
+            txns_1h.append(t)
+            amount_1h += int(t.get("amount", 0))
+        if age_secs <= 86400 and t.get("type") in ("20", "refund", "REFUND"):
+            refunds_today += 1
+
+    lim = CB_VELOCITY_LIMITS
+    stats = {
+        "txn_30min": len(txns_30min),
+        "txn_1h": len(txns_1h),
+        "amount_1h": amount_1h,
+        "refunds_today": refunds_today,
+    }
+
+    if len(txns_30min) >= lim["max_txn_per_30min"]:
+        return False, "R13", "Vélocité dépassée : {} txn/30min (max {})".format(
+            len(txns_30min), lim["max_txn_per_30min"]), stats
+
+    if len(txns_1h) >= lim["max_txn_per_hour"]:
+        return False, "R13", "Vélocité dépassée : {} txn/h (max {})".format(
+            len(txns_1h), lim["max_txn_per_hour"]), stats
+
+    if (amount_1h + current_amount) > lim["max_amount_per_hour"]:
+        return False, "R13", "Vélocité montant dépassée : {:.2f}€/h > {:.2f}€".format(
+            (amount_1h + current_amount) / 100,
+            lim["max_amount_per_hour"] / 100), stats
+
+    if transaction_type in ("20", "refund", "REFUND"):
+        if refunds_today >= lim["max_refund_per_day"]:
+            return False, "R13", "Trop de remboursements aujourd'hui : {} (max {})".format(
+                refunds_today, lim["max_refund_per_day"]), stats
+
+    return True, None, "Vélocité OK ({} txn/30min, {:.2f}€/h)".format(
+        len(txns_30min), amount_1h / 100), stats
+
+
+def check_cb_routing(pan: str, aid_hex: Optional[str],
+                     country_code: Optional[str]) -> dict:
+    """
+    Détermine le routage optimal CB pour une transaction.
+    Pour les transactions domestiques (France), préférence CB native (AID CB)
+    sur VISA/MC selon règle de préférence locale GIE CB.
+    Retourne un dict avec preferred_network, routing_reason, is_domestic.
+    """
+    card = identify_card(pan, aid_hex)
+    is_domestic = country_code in CB_DOMESTIC_COUNTRIES or country_code in CB_OVERSEAS_TERRITORIES
+
+    preferred = card.scheme
+    reason = "Routage par défaut ({})" .format(card.scheme)
+
+    if is_domestic and card.scheme in ("VISA", "MC", "MAESTRO"):
+        preferred = "CB"
+        reason = "Routage CB national prioritaire (pays={}, scheme={})".format(
+            country_code, card.scheme)
+    elif is_domestic:
+        reason = "Réseau CB natif (pays={})".format(country_code)
+    else:
+        reason = "Routage international ({})".format(card.scheme)
+
+    return {
+        "preferred_network": preferred,
+        "actual_scheme": card.scheme,
+        "routing_reason": reason,
+        "is_domestic": is_domestic,
+        "country_code": country_code,
+    }
+
+
+def check_pin_status(pin_tries_remaining: Optional[int]) -> tuple:
+    """
+    Vérifie le statut PIN de la carte.
+    Retourne (allowed, response_code, message)
+    """
+    if pin_tries_remaining is None:
+        return True, None, "Statut PIN non renseigné"
+    if pin_tries_remaining <= 0 and CB_PIN_RULES["block_on_zero"]:
+        return False, "75", "PIN bloqué — {} tentatives épuisées".format(CB_PIN_RULES["max_tries"])
+    if pin_tries_remaining == 1:
+        return True, None, "WARN: Dernière tentative PIN autorisée"
+    return True, None, "PIN OK ({} tentative(s) restante(s))".format(pin_tries_remaining)
+
+
+def check_refund_rules(amount: int, refund_original_amount: Optional[int]) -> tuple:
+    """
+    Vérifie les règles de remboursement CB.
+    Retourne (allowed, reason_code, message)
+    """
+    if refund_original_amount is None:
+        return True, None, "Remboursement sans montant original de référence"
+    ratio = CB_VELOCITY_LIMITS["max_refund_amount_ratio"]
+    max_refund = int(refund_original_amount * ratio)
+    if amount > max_refund:
+        return False, "R15", "Montant remboursement {:.2f}€ > original {:.2f}€ (ratio={})".format(
+            amount / 100, refund_original_amount / 100, ratio)
+    return True, None, "Remboursement OK ({:.2f}€ ≤ {:.2f}€)".format(
+        amount / 100, refund_original_amount / 100)
+
+
+def get_cb_service_indicator(transaction_type: str, is_contactless: bool = False,
+                              is_ecommerce: bool = False, is_recurring: bool = False,
+                              is_preauth: bool = False, scheme: str = "CB",
+                              is_international: bool = False) -> str:
+    """
+    Calcule l'indicateur de service CB final selon le contexte complet
+    de la transaction.
+    """
+    if transaction_type in ("01", "withdrawal"):
+        if is_international and scheme in ("VISA", "MC", "MAESTRO", "AMEX"):
+            return "05"
+        return "04"
+    if transaction_type in ("20", "refund", "REFUND"):
+        return "12"
+    if transaction_type in ("22", "cancel", "CANCEL"):
+        return "11"
+    if transaction_type in ("10", "preauth", "PREAUTH") or is_preauth:
+        return "10"
+    if is_recurring:
+        return "08"
+    if is_ecommerce:
+        return "07"
+    if is_contactless:
+        return "06"
+    if scheme in ("VISA",):
+        return "02"
+    if scheme in ("MC", "MAESTRO"):
+        return "03"
+    return "01"
+
+
+def evaluate_threeds_result(threeds_eci: Optional[str]) -> tuple:
+    """
+    Interprète l'ECI 3DS2 dans le contexte CB.
+    ECI 05 = authentifié, 06 = tentative, 07 = non authentifié.
+    Retourne (sca_satisfied, threeds_result_str, warnings)
+    """
+    warnings = []
+    if threeds_eci is None:
+        return None, None, warnings
+    if threeds_eci == "05":
+        return True, "3DS2_AUTHENTICATED (ECI=05)", warnings
+    if threeds_eci == "06":
+        warnings.append("3DS2 tentative (ECI=06) — authentification partielle")
+        return True, "3DS2_ATTEMPT (ECI=06)", warnings
+    if threeds_eci == "07":
+        warnings.append("3DS2 non authentifié (ECI=07) — SCA non satisfaite")
+        return False, "3DS2_NOT_AUTHENTICATED (ECI=07)", warnings
+    warnings.append("ECI inconnu : {}".format(threeds_eci))
+    return None, "3DS2_UNKNOWN (ECI={})".format(threeds_eci), warnings
+
+
 def evaluate_cb_rules(
         pan: str, amount: int, currency: str, transaction_type: str,
         mcc: Optional[str] = None, aid_hex: Optional[str] = None,
         is_contactless: bool = False, contactless_cumul: int = 0,
         consecutive_offline: int = 0, is_recurring: bool = False,
-        pos_entry_mode: Optional[str] = None) -> CBAuthResult:
+        pos_entry_mode: Optional[str] = None,
+        country_code: Optional[str] = None,
+        is_ecommerce: bool = False,
+        is_preauth: bool = False,
+        threeds_eci: Optional[str] = None,
+        pin_tries_remaining: Optional[int] = None,
+        recent_transactions: Optional[List[dict]] = None,
+        refund_original_amount: Optional[int] = None) -> "CBAuthResult":
     """
-    Moteur de règles GIE CB principal.
+    Moteur de règles GIE CB principal — flux complet.
     Évalue toutes les règles CB applicables à une transaction.
     """
     warnings = []
@@ -333,20 +582,71 @@ def evaluate_cb_rules(
     if pos_entry_mode and pos_entry_mode[:2] in ("07", "91", "92"):
         is_contactless = True
 
+    # Détection e-commerce via POS entry mode
+    if pos_entry_mode and pos_entry_mode[:2] in ("01", "81"):
+        is_ecommerce = True
+
+    def _reject(rc, cb_rc, msg, si, cl_chk, mcc_r, cap_chk, decline, vel="N/A", rout="N/A", tdsr=None, pin_chk=None):
+        return CBAuthResult(
+            allowed=False, response_code=rc, cb_response_code=cb_rc,
+            response_message=msg, service_indicator=si,
+            sca_exemption=None, floor_limit_applied=0,
+            is_contactless=is_contactless, contactless_check=cl_chk,
+            mcc_rule=mcc_r, cap_check=cap_chk, tap_params=CB_TAP,
+            warnings=warnings + [msg],
+            cb_decline_reason=decline,
+            velocity_check=vel, routing_info=rout,
+            threeds_result=tdsr, pin_check=pin_chk,
+        )
+
+    # ── 0. MCC restreint ──────────────────────────────────────────────────────
+    mcc_ok, mcc_decline, mcc_msg = check_mcc_restriction(mcc)
+    if not mcc_ok:
+        return _reject("57", "57", mcc_msg,
+                        card_info.service_indicator, "N/A", "MCC_BLOCKED",
+                        "REJECTED", mcc_decline)
+
+    # ── 0.5. PIN status ───────────────────────────────────────────────────────
+    pin_ok, pin_rc, pin_msg = check_pin_status(pin_tries_remaining)
+    pin_check_str = pin_msg
+    if not pin_ok:
+        return _reject(pin_rc, pin_rc, pin_msg,
+                        card_info.service_indicator, "N/A", "N/A",
+                        "REJECTED", "R14",
+                        pin_chk=pin_msg)
+    if pin_msg.startswith("WARN"):
+        warnings.append(pin_msg)
+
+    # ── 0.7. Vélocité ─────────────────────────────────────────────────────────
+    vel_ok, vel_decline, vel_msg, vel_stats = check_velocity(
+        recent_transactions, amount, transaction_type)
+    velocity_check_str = vel_msg
+    if not vel_ok:
+        return _reject("65", "65", vel_msg,
+                        card_info.service_indicator, "N/A", "N/A",
+                        "REJECTED", vel_decline,
+                        vel=vel_msg)
+
+    # ── 0.8. Règles remboursement ─────────────────────────────────────────────
+    if transaction_type in ("20", "refund", "REFUND"):
+        ref_ok, ref_decline, ref_msg = check_refund_rules(amount, refund_original_amount)
+        if not ref_ok:
+            return _reject("57", "57", ref_msg,
+                            card_info.service_indicator, "N/A", "REFUND_CHECK",
+                            "REJECTED", ref_decline,
+                            vel=velocity_check_str)
+
+    # ── 0.9. Routage domestique ───────────────────────────────────────────────
+    routing = check_cb_routing(pan, aid_hex, country_code)
+    routing_info = "{preferred_network} ({routing_reason})".format(**routing)
+
     # ── 1. Contrôle CAP — plafond global ─────────────────────────────────────
     if amount > CB_CAP["referral_threshold"]:
-        return CBAuthResult(
-            allowed=False, response_code="01", cb_response_code="01",
-            response_message="Référer à l'émetteur — plafond CB CAP dépassé",
-            service_indicator=card_info.service_indicator,
-            sca_exemption=None, floor_limit_applied=0,
-            is_contactless=is_contactless, contactless_check="N/A",
-            mcc_rule="CAP_EXCEEDED", cap_check="REFERRAL",
-            tap_params=CB_TAP,
-            warnings=["Montant {:.2f}€ > plafond CAP {:.2f}€".format(
-                amount/100, CB_CAP["referral_threshold"]/100)],
-            cb_decline_reason="R05",
-        )
+        return _reject("01", "01",
+                        "Référer à l'émetteur — plafond CB CAP dépassé",
+                        card_info.service_indicator, "N/A", "CAP_EXCEEDED",
+                        "REFERRAL", "R05",
+                        vel=velocity_check_str, rout=routing_info)
 
     # ── 2. Règles sans contact ────────────────────────────────────────────────
     cl_check = "N/A"
@@ -354,22 +654,14 @@ def evaluate_cb_rules(
         cl_ok, cl_code, cl_msg = check_contactless(
             amount, contactless_cumul, consecutive_offline)
         if not cl_ok:
-            return CBAuthResult(
-                allowed=False, response_code="62", cb_response_code=cl_code,
-                response_message=CB_RESPONSE_CODES.get(cl_code, cl_msg),
-                service_indicator="06",
-                sca_exemption=None, floor_limit_applied=0,
-                is_contactless=True, contactless_check="FAILED",
-                mcc_rule="N/A", cap_check="OK",
-                tap_params=CB_TAP,
-                warnings=[cl_msg],
-                cb_decline_reason="R07",
-            )
+            return _reject("62", cl_code,
+                            CB_RESPONSE_CODES.get(cl_code, cl_msg),
+                            "06", "FAILED", "N/A", "OK",
+                            "R07",
+                            vel=velocity_check_str, rout=routing_info)
         cl_check = "PASSED ({:.2f}€ / {:.2f}€ cumul)".format(
             amount/100, (contactless_cumul + amount)/100)
-
-        if is_contactless:
-            card_info.service_indicator = "06"
+        card_info.service_indicator = "06"
 
     # ── 3. Floor limit MCC ───────────────────────────────────────────────────
     floor = get_floor_limit(mcc)
@@ -377,10 +669,24 @@ def evaluate_cb_rules(
     if floor == 0:
         warnings.append("MCC {} — autorisation en ligne obligatoire (floor = 0)".format(mcc))
 
-    # ── 4. SCA exemption ─────────────────────────────────────────────────────
+    # ── 4. SCA exemption + 3DS2 ECI ──────────────────────────────────────────
     sca = get_sca_exemption(amount, transaction_type, is_recurring)
+    threeds_sca_ok, threeds_result_str, threeds_warns = evaluate_threeds_result(threeds_eci)
+    warnings.extend(threeds_warns)
+
+    if threeds_sca_ok is False and amount > CB_CONTACTLESS["low_value_threshold"]:
+        warnings.append("SCA DSP2 non satisfaite (ECI=07) — 1A recommandé")
+        if sca in ("NONE", "TRA"):
+            return _reject("57", "1A",
+                            "Authentification forte requise — ECI=07 non satisfait",
+                            card_info.service_indicator, cl_check, mcc_rule,
+                            "REJECTED", "R09",
+                            vel=velocity_check_str, rout=routing_info,
+                            tdsr=threeds_result_str, pin_chk=pin_check_str)
+
     if sca == "NONE" and amount > CB_CONTACTLESS["low_value_threshold"]:
-        warnings.append("SCA complète requise pour ce montant")
+        if not is_ecommerce or threeds_eci is None:
+            warnings.append("SCA complète requise pour ce montant")
 
     # ── 5. Vérification TAP4 (cumul hors ligne) ───────────────────────────────
     if consecutive_offline >= CB_TAP["TAP4_max_offline_count"]:
@@ -391,14 +697,10 @@ def evaluate_cb_rules(
     if amount >= CB_CAP["high_value_threshold"]:
         warnings.append("Montant élevé CB ({:.2f}€) — contrôle renforcé".format(amount/100))
 
-    # ── 7. Service indicator final ───────────────────────────────────────────
-    si = card_info.service_indicator
-    if transaction_type == "01":
-        si = "04"
-    elif transaction_type == "20":
-        si = "12"
-    elif is_contactless:
-        si = "06"
+    # ── 7. Service indicator final (flux complet) ─────────────────────────────
+    si = get_cb_service_indicator(
+        transaction_type, is_contactless, is_ecommerce, is_recurring,
+        is_preauth, card_info.scheme)
 
     return CBAuthResult(
         allowed=True, response_code="00",
@@ -414,4 +716,8 @@ def evaluate_cb_rules(
             amount/100, CB_CAP["max_online_amount"]/100),
         tap_params=CB_TAP,
         warnings=warnings,
+        velocity_check=velocity_check_str,
+        routing_info=routing_info,
+        threeds_result=threeds_result_str,
+        pin_check=pin_check_str,
     )

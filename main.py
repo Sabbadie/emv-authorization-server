@@ -1,7 +1,8 @@
 """
-EMV Authorization Server v1.6.0 — Entry Point
+EMV Authorization Server v1.8.0 — Entry Point
 Intègre : P1 (PostgreSQL + SQLAlchemy), P2 (backup JSON),
-          S4 (Pydantic validation), D5 (Dashboard alertes)
+          S4 (Pydantic validation), D5 (Dashboard alertes),
+          C1 (flux CB complet), A2 (mode dégradé/chaos), A3 (config YAML/TOML)
 """
 
 import logging
@@ -17,11 +18,12 @@ logger = logging.getLogger(__name__)
 
 if __name__ == "__main__":
     logger.info("=" * 60)
-    logger.info("  Serveur d'Autorisation EMV v1.6.0")
+    logger.info("  Serveur d'Autorisation EMV v1.8.0")
     logger.info("  EMV 4.3 | ISO 8583 | ARQC/ARPC | GIE CB | CVV")
     logger.info("  S1:APIKey | S2:RateLimit | S3:PANMask | S4:Pydantic")
     logger.info("  D1:Charts | D2:CSV | D4:Batch | D5:Alertes | D6:DarkMode")
     logger.info("  E1:CVV | P1:PostgreSQL | P2:JSONBackup")
+    logger.info("  C1:FluxCB | A2:ChaosMode | A3:ConfigYAML")
     logger.info("=" * 60)
 
     # ── P1 : Initialisation base de données ────────────────────────────────────

@@ -56,6 +56,12 @@ from pydantic import ValidationError
 from schemas import AuthorizeRequest, pydantic_error_response
 from emv.alerts import get_active_alerts, get_alert_summary
 from database import db_health as _db_health
+from emv.degraded import get_chaos_manager, ChaosException, FailureType
+from config_loader import get_config_manager, get_config
+from emv.giecb import (check_mcc_restriction, check_velocity, check_cb_routing,
+                        check_pin_status, check_refund_rules,
+                        get_cb_service_indicator, CB_BLOCKED_MCCS,
+                        CB_VELOCITY_LIMITS, CB_DECLINE_REASONS, CB_PIN_RULES)
 
 # ── S3 : Masquage PAN dans les logs ─────────────────────────────────────────
 _PAN_RE = re.compile(r'\b([3-6]\d{5})\d{6,10}(\d{4})\b')
@@ -110,6 +116,32 @@ def check_api_key():
     provided = request.headers.get("X-Api-Key", "")
     if provided != Config.API_KEY:
         return jsonify({"error": "Unauthorized — X-Api-Key invalide ou manquante"}), 401
+
+
+@app.before_request
+def chaos_middleware():
+    """A2 — Injection de pannes contrôlées (mode dégradé)."""
+    if not request.path.startswith("/api/"):
+        return
+    if request.path.startswith("/api/v1/chaos"):
+        return
+    endpoint_tag = request.path.replace("/api/v1/", "").split("/")[0]
+    try:
+        get_chaos_manager().inject_chaos(endpoint_tag)
+    except ChaosException as exc:
+        http_code = {
+            FailureType.TIMEOUT:         503,
+            FailureType.NETWORK_ERROR:   503,
+            FailureType.INTERNAL_ERROR:  500,
+            FailureType.PARTIAL_FAILURE: 500,
+            FailureType.SLOW_RESPONSE:   200,
+        }.get(exc.failure_type, 500)
+        return jsonify({
+            "error": "mode_degrade",
+            "failure_type": exc.failure_type.value,
+            "message": str(exc),
+            "endpoint": exc.endpoint,
+        }), http_code
 
 # ── Scénarios batch pré-définis ───────────────────────────────────────────────
 BATCH_TEST_PANS = [
@@ -2954,6 +2986,211 @@ def cda_verify():
         return jsonify({"error": "pan, sdad_hex, unpredictable_number_hex requis"}), 400
     res = verify_cda(pan, sdad_hex, un_hex, arqc_hex=data.get("arqc_hex"))
     return jsonify(res), 200
+
+
+# ═══════════════════════════════════════════════════════════════════════════
+# C1 — Flux CB complet (routing, vélocité, MCC, PIN)
+# ═══════════════════════════════════════════════════════════════════════════
+
+@app.route("/api/v1/cb/routing", methods=["POST"])
+def cb_routing():
+    """C1 — Détermine le réseau de routage optimal pour une transaction CB."""
+    data = request.get_json(force=True) or {}
+    pan    = data.get("pan", "")
+    aid    = data.get("aid_hex")
+    country = data.get("country_code")
+    if not pan:
+        return jsonify({"error": "pan requis"}), 400
+    routing = check_cb_routing(pan, aid, country)
+    return jsonify(routing), 200
+
+
+@app.route("/api/v1/cb/velocity", methods=["POST"])
+def cb_velocity():
+    """C1 — Vérifie les règles de vélocité CB pour un PAN."""
+    data = request.get_json(force=True) or {}
+    amount  = data.get("amount", 0)
+    txn_type = data.get("transaction_type", "00")
+    recent  = data.get("recent_transactions", [])
+    ok, reason, msg, stats = check_velocity(recent, int(amount), txn_type)
+    return jsonify({
+        "allowed": ok,
+        "reason_code": reason,
+        "message": msg,
+        "stats": stats,
+        "limits": CB_VELOCITY_LIMITS,
+    }), 200
+
+
+@app.route("/api/v1/cb/mcc-check", methods=["POST"])
+def cb_mcc_check():
+    """C1 — Vérifie si un MCC est autorisé sur le réseau CB."""
+    data = request.get_json(force=True) or {}
+    mcc = data.get("mcc")
+    ok, reason, msg = check_mcc_restriction(mcc)
+    return jsonify({
+        "allowed": ok,
+        "mcc": mcc,
+        "reason_code": reason,
+        "message": msg,
+        "blocked_mccs": CB_BLOCKED_MCCS,
+    }), 200
+
+
+@app.route("/api/v1/cb/pin-status", methods=["POST"])
+def cb_pin_status():
+    """C1 — Vérifie le statut PIN d'une carte (tentatives restantes)."""
+    data = request.get_json(force=True) or {}
+    tries = data.get("pin_tries_remaining")
+    ok, rc, msg = check_pin_status(None if tries is None else int(tries))
+    return jsonify({
+        "allowed": ok,
+        "response_code": rc,
+        "message": msg,
+        "rules": CB_PIN_RULES,
+    }), 200
+
+
+@app.route("/api/v1/cb/service-indicators", methods=["GET"])
+def cb_service_indicators():
+    """C1 — Liste les indicateurs de service CB et leur signification."""
+    from emv.giecb import CB_SERVICE_INDICATORS as SI
+    return jsonify({
+        "service_indicators": SI,
+        "decline_reasons": CB_DECLINE_REASONS,
+        "blocked_mccs": CB_BLOCKED_MCCS,
+        "velocity_limits": CB_VELOCITY_LIMITS,
+        "pin_rules": CB_PIN_RULES,
+    }), 200
+
+
+# ═══════════════════════════════════════════════════════════════════════════
+# A2 — Mode dégradé simulé / Chaos Engineering
+# ═══════════════════════════════════════════════════════════════════════════
+
+@app.route("/api/v1/chaos", methods=["GET"])
+def chaos_status():
+    """A2 — Retourne le statut du mode dégradé et les statistiques."""
+    return jsonify(get_chaos_manager().get_status()), 200
+
+
+@app.route("/api/v1/chaos/enable", methods=["POST"])
+def chaos_enable():
+    """A2 — Active le mode dégradé avec les paramètres fournis."""
+    data = request.get_json(force=True) or {}
+    failure_rate  = float(data.get("failure_rate", 0.1))
+    failure_types = data.get("failure_types", ["INTERNAL_ERROR"])
+    latency_ms    = int(data.get("latency_ms", 0))
+    valid_types = {ft.value for ft in FailureType}
+    for ft in failure_types:
+        if ft not in valid_types:
+            return jsonify({"error": "failure_type invalide: {}".format(ft),
+                            "valid_types": list(valid_types)}), 400
+    get_chaos_manager().enable(failure_rate=failure_rate,
+                                failure_types=failure_types,
+                                latency_ms=latency_ms)
+    return jsonify({
+        "enabled": True,
+        "failure_rate": failure_rate,
+        "failure_types": failure_types,
+        "latency_ms": latency_ms,
+        "message": "Mode dégradé activé",
+    }), 200
+
+
+@app.route("/api/v1/chaos/disable", methods=["POST"])
+def chaos_disable():
+    """A2 — Désactive le mode dégradé."""
+    get_chaos_manager().disable()
+    return jsonify({"enabled": False, "message": "Mode dégradé désactivé"}), 200
+
+
+@app.route("/api/v1/chaos/reset", methods=["POST"])
+def chaos_reset():
+    """A2 — Réinitialise toute la configuration et les statistiques chaos."""
+    get_chaos_manager().reset()
+    return jsonify({"message": "Configuration chaos réinitialisée",
+                    "status": get_chaos_manager().get_status()}), 200
+
+
+@app.route("/api/v1/chaos/endpoint", methods=["POST"])
+def chaos_configure_endpoint():
+    """A2 — Configure le chaos pour un endpoint spécifique."""
+    data = request.get_json(force=True) or {}
+    endpoint_tag = data.get("endpoint_tag")
+    if not endpoint_tag:
+        return jsonify({"error": "endpoint_tag requis"}), 400
+    valid_types = {ft.value for ft in FailureType}
+    failure_types = data.get("failure_types", ["INTERNAL_ERROR"])
+    for ft in failure_types:
+        if ft not in valid_types:
+            return jsonify({"error": "failure_type invalide: {}".format(ft)}), 400
+    get_chaos_manager().configure_endpoint(
+        endpoint_tag=endpoint_tag,
+        failure_rate=float(data.get("failure_rate", 0.1)),
+        failure_types=failure_types,
+        latency_ms=int(data.get("latency_ms", 0)),
+        latency_jitter_ms=int(data.get("latency_jitter_ms", 0)),
+        enabled=bool(data.get("enabled", True)),
+    )
+    return jsonify({
+        "endpoint_tag": endpoint_tag,
+        "configured": True,
+        "status": get_chaos_manager().get_status()["endpoints"].get(endpoint_tag),
+    }), 200
+
+
+@app.route("/api/v1/chaos/endpoint/<string:endpoint_tag>", methods=["DELETE"])
+def chaos_remove_endpoint(endpoint_tag):
+    """A2 — Supprime la configuration chaos d'un endpoint."""
+    get_chaos_manager().remove_endpoint(endpoint_tag)
+    return jsonify({"endpoint_tag": endpoint_tag, "removed": True}), 200
+
+
+@app.route("/api/v1/chaos/stats", methods=["GET"])
+def chaos_stats():
+    """A2 — Retourne uniquement les statistiques d'injection."""
+    return jsonify(get_chaos_manager().get_stats()), 200
+
+
+# ═══════════════════════════════════════════════════════════════════════════
+# A3 — Configuration YAML/TOML rechargeable
+# ═══════════════════════════════════════════════════════════════════════════
+
+@app.route("/api/v1/config", methods=["GET"])
+def config_get():
+    """A3 — Retourne la configuration active (sans secrets)."""
+    cfg = get_config_manager().get_all()
+    sensitive = {"api_key", "secret_key", "database_url", "password", "token",
+                 "cvk1", "cvk2", "mdk_ac", "mdk_enc", "mdk_mac"}
+    def _redact(d):
+        if not isinstance(d, dict):
+            return d
+        return {k: ("[REDACTED]" if k.lower() in sensitive else _redact(v))
+                for k, v in d.items()}
+    return jsonify({
+        "config": _redact(cfg),
+        "status": get_config_manager().get_status(),
+    }), 200
+
+
+@app.route("/api/v1/config/reload", methods=["POST"])
+def config_reload():
+    """A3 — Force le rechargement de la configuration depuis le fichier."""
+    report = get_config_manager().reload()
+    return jsonify({
+        "reloaded": report["reloaded"],
+        "config_path": report["config_path"],
+        "reload_count": report["reload_count"],
+        "reload_errors": report["reload_errors"],
+        "message": "Configuration rechargée" if report["reloaded"] else "Aucun changement détecté",
+    }), 200
+
+
+@app.route("/api/v1/config/status", methods=["GET"])
+def config_status():
+    """A3 — Retourne le statut du gestionnaire de configuration."""
+    return jsonify(get_config_manager().get_status()), 200
 
 
 # ═══════════════════════════════════════════════════════════════════════════
