@@ -1574,6 +1574,92 @@ def get_transactions_by_pan(pan):
     })
 
 
+# ── R1 : Redressements ────────────────────────────────────────────────────────
+
+@app.route("/api/v1/transactions/<transaction_id>/reverse", methods=["POST"])
+def reverse_transaction(transaction_id):
+    """
+    Redressement d'une transaction approuvée (complet ou partiel).
+    Corps JSON (optionnel) :
+      { "amount": 5000, "rrn": "...", "terminal_id": "..." }
+    Si 'amount' est absent → redressement complet.
+    """
+    from emv.reversal import process_reversal
+    data = request.get_json() or {}
+    reversal_amount = data.get("amount")
+    if reversal_amount is not None:
+        try:
+            reversal_amount = int(reversal_amount)
+        except (TypeError, ValueError):
+            return jsonify({"error": "Le montant doit être un entier (centimes)"}), 400
+
+    result = process_reversal(
+        transaction_id=transaction_id,
+        reversal_amount=reversal_amount,
+        reversal_rrn=data.get("rrn"),
+        terminal_id=data.get("terminal_id"),
+        is_advice=False,
+    )
+    status_code = 200 if result.accepted else 422
+    return jsonify(result.to_dict()), status_code
+
+
+@app.route("/api/v1/transactions/reverse", methods=["POST"])
+def reverse_by_rrn():
+    """
+    Redressement par RRN (Retrieval Reference Number).
+    Corps JSON :
+      { "rrn": "...", "amount": 5000 (optionnel), "terminal_id": "..." }
+    """
+    from emv.reversal import process_reversal
+    data = request.get_json() or {}
+    rrn = data.get("rrn")
+    if not rrn:
+        return jsonify({"error": "Champ 'rrn' requis"}), 400
+
+    reversal_amount = data.get("amount")
+    if reversal_amount is not None:
+        try:
+            reversal_amount = int(reversal_amount)
+        except (TypeError, ValueError):
+            return jsonify({"error": "Le montant doit être un entier (centimes)"}), 400
+
+    result = process_reversal(
+        rrn=rrn,
+        reversal_amount=reversal_amount,
+        reversal_rrn=data.get("reversal_rrn"),
+        terminal_id=data.get("terminal_id"),
+        is_advice=False,
+    )
+    status_code = 200 if result.accepted else 422
+    return jsonify(result.to_dict()), status_code
+
+
+@app.route("/api/v1/transactions/<transaction_id>/reverse/advice", methods=["POST"])
+def reverse_advice(transaction_id):
+    """
+    Avis de redressement (ISO 8583 MTI 0420) — toujours accepté.
+    Corps JSON (optionnel) : { "amount": 5000, "rrn": "..." }
+    """
+    from emv.reversal import process_reversal
+    data = request.get_json() or {}
+    reversal_amount = data.get("amount")
+    if reversal_amount is not None:
+        try:
+            reversal_amount = int(reversal_amount)
+        except (TypeError, ValueError):
+            return jsonify({"error": "Le montant doit être un entier (centimes)"}), 400
+
+    result = process_reversal(
+        transaction_id=transaction_id,
+        reversal_amount=reversal_amount,
+        reversal_rrn=data.get("rrn"),
+        terminal_id=data.get("terminal_id"),
+        is_advice=True,
+    )
+    return jsonify(result.to_dict()), 200
+
+
 # ── Tranches de montant ───────────────────────────────────────────────────────
 
 @app.route("/api/v1/amount-tiers", methods=["GET"])

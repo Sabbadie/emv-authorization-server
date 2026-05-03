@@ -39,6 +39,12 @@ class Transaction:
         self.processed_at = None
         self.decline_reason = None
         self.rrn = self._generate_rrn()
+        # Redressements
+        self.reversed_at = None
+        self.reversal_amount = None
+        self.reversal_rrn = None
+        self.reversal_terminal_id = None
+        self.is_partial_reversal = False
         # Tranches montant
         self.amount_tier = None
         self.risk_level = None
@@ -78,6 +84,20 @@ class Transaction:
         self.decline_reason = reason
         self.processed_at = datetime.utcnow().isoformat()
 
+    def reverse(self, reversal_amount=None, reversal_rrn=None, terminal_id=None):
+        """
+        Marque la transaction comme redressée.
+        reversal_amount = montant redressé (défaut : montant total).
+        Appelé par emv/reversal.py après validation.
+        """
+        amount = reversal_amount if reversal_amount is not None else self.amount
+        self.status = TransactionStatus.REVERSED
+        self.reversed_at = datetime.utcnow().isoformat()
+        self.reversal_amount = amount
+        self.reversal_rrn = reversal_rrn
+        self.reversal_terminal_id = terminal_id
+        self.is_partial_reversal = (amount < self.amount)
+
     def to_dict(self, masked=True):
         pan_display = "*" * (len(self.pan) - 4) + self.pan[-4:] if masked else self.pan
         return {
@@ -113,6 +133,13 @@ class Transaction:
             "cb_decline_reason": self.cb_decline_reason,
             "created_at": self.created_at,
             "processed_at": self.processed_at,
+            "reversed_at": getattr(self, "reversed_at", None),
+            "reversal_amount": getattr(self, "reversal_amount", None),
+            "reversal_amount_formatted": (
+                "{:.2f}".format(self.reversal_amount / 100)
+                if getattr(self, "reversal_amount", None) is not None else None
+            ),
+            "is_partial_reversal": getattr(self, "is_partial_reversal", False),
         }
 
 
@@ -150,10 +177,17 @@ class TransactionLog:
                        if t.status == TransactionStatus.APPROVED)
         declined = sum(1 for t in self._transactions.values()
                        if t.status == TransactionStatus.DECLINED)
+        reversed_ = sum(1 for t in self._transactions.values()
+                        if t.status == TransactionStatus.REVERSED)
         errors = sum(1 for t in self._transactions.values()
                      if t.status == TransactionStatus.ERROR)
         total_amount = sum(t.amount for t in self._transactions.values()
                            if t.status == TransactionStatus.APPROVED)
+        reversed_amount = sum(
+            getattr(t, "reversal_amount", None) or t.amount
+            for t in self._transactions.values()
+            if t.status == TransactionStatus.REVERSED
+        )
         by_tier, by_path, by_risk, by_cb_scheme = {}, {}, {}, {}
         for t in self._transactions.values():
             if t.amount_tier:
@@ -168,6 +202,9 @@ class TransactionLog:
             "total": total,
             "approved": approved,
             "declined": declined,
+            "reversed": reversed_,
+            "reversed_amount": reversed_amount,
+            "reversed_amount_formatted": "{:.2f}".format(reversed_amount / 100),
             "errors": errors,
             "approval_rate": "{:.1f}%".format(
                 (approved / total * 100) if total > 0 else 0),

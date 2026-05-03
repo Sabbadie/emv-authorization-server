@@ -45,6 +45,27 @@ ISO8583_FIELDS = {
     128: {"name": "MAC 2", "type": "b", "length": 8},
 }
 
+MTI_DESCRIPTIONS = {
+    "0100": "Authorization Request",
+    "0110": "Authorization Response",
+    "0200": "Financial Transaction Request",
+    "0210": "Financial Transaction Response",
+    "0400": "Reversal Request",
+    "0410": "Reversal Response",
+    "0420": "Reversal Advice",
+    "0430": "Reversal Advice Response",
+    "0800": "Network Management Request",
+    "0810": "Network Management Response",
+}
+
+REVERSAL_RESPONSE_CODES = {
+    "00": "Redressement accepté",
+    "25": "Transaction originale introuvable",
+    "40": "Transaction non redressable",
+    "56": "Aucune réponse précédente (déjà redressé)",
+    "61": "Montant de redressement supérieur au montant original",
+}
+
 PROCESSING_CODES = {
     "00": "Purchase",
     "01": "Cash Advance",
@@ -133,10 +154,23 @@ class ISO8583Message:
         return result
 
     def to_response(self, response_code, auth_code=None, field_55_response=None):
-        resp = ISO8583Message(mti="0110")
+        """Construit le message de réponse correspondant à ce MTI."""
+        response_mti = {
+            "0100": "0110",
+            "0200": "0210",
+            "0400": "0410",
+            "0420": "0430",
+            "0800": "0810",
+        }.get(self.mti, "0110")
+
+        resp = ISO8583Message(mti=response_mti)
         for fnum in [2, 3, 4, 7, 11, 12, 13, 18, 22, 25, 37, 41, 42, 49]:
             if fnum in self.fields:
                 resp.set_field(fnum, self.fields[fnum])
+
+        # Field 90 (Original Data Elements) — écho pour les reversals
+        if self.mti in ("0400", "0420") and 90 in self.fields:
+            resp.set_field(90, self.fields[90])
 
         resp.set_field(39, response_code)
         if auth_code:
@@ -145,6 +179,30 @@ class ISO8583Message:
             resp.set_field(55, field_55_response)
 
         return resp
+
+    @property
+    def original_transaction_id(self):
+        """Extrait l'ID de transaction originale depuis le champ 90 ou le champ custom."""
+        return self.fields.get(125)  # champ custom pour l'ID interne
+
+    @property
+    def reversal_amount(self):
+        """Montant de redressement depuis le champ 95 (Replacement Amounts)."""
+        val = self.fields.get(95)
+        if val:
+            try:
+                return int(str(val)[:12])
+            except (ValueError, TypeError):
+                pass
+        return None
+
+    @property
+    def is_reversal(self):
+        return self.mti in ("0400", "0420")
+
+    @property
+    def is_advice(self):
+        return self.mti in ("0420", "0430")
 
 
 def parse_from_dict(data):

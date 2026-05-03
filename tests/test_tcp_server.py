@@ -289,12 +289,23 @@ class TestProcessRequest:
         assert resp["approved"] is False
 
     def test_iso8583_unsupported_mti(self):
+        # MTI 0400 est désormais traité comme redressement — on utilise 0300
+        # qui est vraiment non supporté par ce serveur
         resp = process_request({
-            "mti": "0400",
+            "mti": "0300",
             "fields": {"2": PAN_ACTIVE, "4": "000000005000", "49": "978"}
         })
         assert resp["approved"] is False
         assert resp["response_code"] == "30"
+
+    def test_iso8583_0400_handled_as_reversal(self):
+        # MTI 0400 est désormais traité comme un redressement (pas une erreur)
+        resp = process_request({
+            "mti": "0400",
+            "fields": {"2": PAN_ACTIVE, "4": "000000005000", "49": "978"}
+        })
+        assert resp["mti"] == "0410"
+        assert "response_code" in resp
 
     def test_response_always_has_mti_0110(self):
         for req in [

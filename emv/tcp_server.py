@@ -114,13 +114,19 @@ def _iso8583_to_auth_params(msg) -> dict:
 
 def process_request(request: dict) -> dict:
     """
-    Traite une requête d'autorisation (format natif ou ISO 8583 dict).
+    Traite une requête d'autorisation ou de redressement
+    (format natif ou ISO 8583 dict).
     Retourne un dict de réponse prêt à être sérialisé.
     """
     try:
         # ── Détection du format ──────────────────────────────────────────────
         if "mti" in request:
             iso_msg = parse_from_dict(request)
+
+            # Redressements 0400 / 0420
+            if iso_msg.mti in ("0400", "0420"):
+                return _process_reversal_iso(iso_msg)
+
             if iso_msg.mti not in ("0100", "0200"):
                 return _error_response("30", f"MTI non supporté : {iso_msg.mti}")
             params = _iso8583_to_auth_params(iso_msg)
@@ -188,6 +194,46 @@ def process_request(request: dict) -> dict:
     except Exception as exc:
         logger.exception("Erreur inattendue lors du traitement TCP")
         return _error_response("96", f"Erreur système : {exc}")
+
+
+def _process_reversal_iso(iso_msg) -> dict:
+    """
+    Traite un redressement ISO 8583 (MTI 0400 ou 0420).
+    Identifie la transaction originale par champ 37 (RRN) ou champ 125 (ID interne).
+    """
+    from emv.reversal import process_reversal
+
+    rrn = iso_msg.rrn or None
+    txn_id = iso_msg.fields.get(125)
+    reversal_amount = iso_msg.reversal_amount
+    terminal_id = iso_msg.terminal_id or None
+    is_advice = iso_msg.mti == "0420"
+
+    result = process_reversal(
+        transaction_id=txn_id,
+        rrn=rrn,
+        reversal_amount=reversal_amount,
+        reversal_rrn=None,
+        terminal_id=terminal_id,
+        is_advice=is_advice,
+    )
+
+    response_mti = "0430" if is_advice else "0410"
+    resp = {
+        "mti":            response_mti,
+        "rrn":            rrn,
+        "accepted":       result.accepted,
+        "response_code":  result.response_code,
+        "reversal_amount": result.reversal_amount,
+        "message":        result.message,
+        "is_advice":      result.is_advice,
+    }
+    if result.original_transaction:
+        resp["original_transaction_id"] = result.original_transaction.id
+        pan_raw = result.original_transaction.pan
+        resp["pan_masked"] = pan_raw[:6] + "*" * (len(pan_raw) - 10) + pan_raw[-4:]
+
+    return resp
 
 
 def _error_response(code: str, error: str) -> dict:
