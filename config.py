@@ -1,11 +1,21 @@
 import os
 
+
 class Config:
     HOST = os.getenv("HOST", "0.0.0.0")
     PORT = int(os.getenv("PORT", 5000))
     DEBUG = os.getenv("DEBUG", "false").lower() == "true"
 
     SECRET_KEY = os.getenv("SECRET_KEY", "emv-auth-server-secret-2024")
+
+    # S1 — Authentification API Key
+    # Si vide → pas d'auth requise (mode dev).  Définir EMV_API_KEY en prod.
+    API_KEY = os.getenv("EMV_API_KEY", "")
+
+    # S2 — Rate limiting
+    RATE_LIMIT_DEFAULT   = os.getenv("RATE_LIMIT_DEFAULT",   "300 per minute")
+    RATE_LIMIT_AUTHORIZE = os.getenv("RATE_LIMIT_AUTHORIZE", "30 per minute")
+    RATE_LIMIT_BATCH     = os.getenv("RATE_LIMIT_BATCH",     "5 per minute")
 
     CURRENCY_CODES = {
         "840": "USD",
@@ -52,8 +62,16 @@ class Config:
     MAX_TRANSACTION_AMOUNT = int(os.getenv("MAX_TRANSACTION_AMOUNT", 1000000))
     DAILY_LIMIT = int(os.getenv("DAILY_LIMIT", 500000))
 
-    MDK_AC = bytes.fromhex(os.getenv("MDK_AC", "0123456789ABCDEFFEDCBA9876543210"))
+    MDK_AC  = bytes.fromhex(os.getenv("MDK_AC",  "0123456789ABCDEFFEDCBA9876543210"))
     MDK_ENC = bytes.fromhex(os.getenv("MDK_ENC", "FEDCBA98765432100123456789ABCDEF"))
     MDK_MAC = bytes.fromhex(os.getenv("MDK_MAC", "0123456789ABCDEFFEDCBA9876543210"))
 
+    # Clés CVK (Card Verification Keys) pour CVV/CVC — TEST SEULEMENT
+    CVK1 = bytes.fromhex(os.getenv("CVK1", "0123456789ABCDEF"))
+    CVK2 = bytes.fromhex(os.getenv("CVK2", "FEDCBA9876543210"))
+
     ATC_MAX_REPLAY_WINDOW = 10
+
+    # P2 — Persistance
+    SNAPSHOT_ENABLED  = os.getenv("SNAPSHOT_ENABLED", "true").lower() == "true"
+    SNAPSHOT_INTERVAL = int(os.getenv("SNAPSHOT_INTERVAL_SECS", 120))
