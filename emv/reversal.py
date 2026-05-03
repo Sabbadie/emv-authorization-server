@@ -239,6 +239,20 @@ def process_reversal(transaction_id: str | None = None,
 
     # ── 4. Application ───────────────────────────────────────────────────────
     _apply_reversal(original_txn, amount_to_reverse, reversal_rrn, terminal_id)
+    original_txn.log_event(
+        "REVERSAL_APPLIED",
+        "Redressement appliqué",
+        level="INFO",
+        data={
+            "reversal_amount": amount_to_reverse,
+            "reversal_amount_formatted": "{:.2f}".format(amount_to_reverse / 100),
+            "original_amount": original_txn.amount,
+            "is_partial": amount_to_reverse < original_txn.amount,
+            "reversal_rrn": reversal_rrn,
+            "terminal_id": terminal_id,
+            "is_advice": is_advice,
+        }
+    )
 
     partial = amount_to_reverse < original_txn.amount
     msg = (

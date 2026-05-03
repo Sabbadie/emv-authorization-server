@@ -1244,6 +1244,22 @@ def dashboard():
     return render_template_string(DASHBOARD_HTML)
 
 
+@app.route("/api/v1", methods=["GET"])
+def api_index():
+    """Index de l'API — liste de toutes les routes disponibles."""
+    routes = []
+    for rule in sorted(app.url_map.iter_rules(), key=lambda r: r.rule):
+        if rule.rule.startswith("/api/"):
+            methods = sorted(m for m in rule.methods if m not in ("HEAD", "OPTIONS"))
+            routes.append({"path": rule.rule, "methods": methods})
+    return jsonify({
+        "service": "EMV Authorization Server",
+        "version": "1.4.0",
+        "endpoints": routes,
+        "total": len(routes),
+    })
+
+
 @app.route("/api/v1/health", methods=["GET"])
 def health():
     return jsonify({
@@ -1503,24 +1519,42 @@ def export_transactions():
 @app.route("/api/v1/transactions", methods=["GET"])
 def list_transactions():
     try:
-        limit = min(int(request.args.get("limit", 20)), 200)
+        limit  = min(int(request.args.get("limit", 20)), 200)
         offset = int(request.args.get("offset", 0))
     except (ValueError, TypeError):
         return jsonify({"error": "Invalid pagination parameters"}), 400
-    status_filter = request.args.get("status")
-    tier_filter = request.args.get("tier")
-    transactions = transaction_log.get_all(
-        limit=limit, offset=offset,
-        status=status_filter, tier=tier_filter)
-    all_filtered = transaction_log.get_all(
-        limit=99999, offset=0,
-        status=status_filter, tier=tier_filter)
+
+    filters = dict(
+        status      = request.args.get("status"),
+        tier        = request.args.get("tier"),
+        date_from   = request.args.get("date_from"),
+        date_to     = request.args.get("date_to"),
+        terminal_id = request.args.get("terminal_id"),
+        merchant_id = request.args.get("merchant_id"),
+        cb_scheme   = request.args.get("cb_scheme"),
+        auth_path   = request.args.get("auth_path"),
+        rrn         = request.args.get("rrn"),
+    )
+    try:
+        if request.args.get("amount_min") is not None:
+            filters["amount_min"] = int(request.args.get("amount_min"))
+        if request.args.get("amount_max") is not None:
+            filters["amount_max"] = int(request.args.get("amount_max"))
+    except (ValueError, TypeError):
+        return jsonify({"error": "amount_min/amount_max must be integers (centimes)"}), 400
+
+    filters = {k: v for k, v in filters.items() if v is not None}
+
+    transactions = transaction_log.get_all(limit=limit, offset=offset, **filters)
+    total        = transaction_log.count(**filters)
+
     return jsonify({
         "transactions": [t.to_dict() for t in transactions],
-        "count": len(transactions),
-        "total_filtered": len(all_filtered),
-        "limit": limit,
-        "offset": offset,
+        "count":         len(transactions),
+        "total_filtered": total,
+        "limit":         limit,
+        "offset":        offset,
+        "filters_applied": filters,
     })
 
 
@@ -1571,6 +1605,130 @@ def get_transactions_by_pan(pan):
         "pan": "*" * (len(pan) - 4) + pan[-4:],
         "transactions": [t.to_dict() for t in transactions],
         "count": len(transactions),
+    })
+
+
+@app.route("/api/v1/transactions/rrn/<rrn>", methods=["GET"])
+def get_transaction_by_rrn(rrn):
+    """Récupère une transaction par son RRN (Retrieval Reference Number)."""
+    txn = transaction_log.get_by_rrn(rrn)
+    if not txn:
+        return jsonify({"error": f"Aucune transaction trouvée pour RRN={rrn}"}), 404
+    result = txn.to_dict()
+    tpa = TPAResponse(txn, type("R", (), {
+        "approved": txn.status == "APPROVED",
+        "response_code": txn.response_code,
+        "auth_code": txn.auth_code,
+        "issuer_auth_data": txn.issuer_auth_data,
+        "arpc": txn.arpc,
+    })())
+    result["tpa_response"] = tpa.to_dict(include_definitions=True)
+    return jsonify(result)
+
+
+@app.route("/api/v1/transactions/<transaction_id>/log", methods=["GET"])
+def get_transaction_audit_log(transaction_id):
+    """
+    Journal d'audit détaillé d'une transaction.
+    Retourne toutes les étapes de traitement : parsing EMV, évaluations,
+    contrôles, décision finale, et redressement éventuel.
+    """
+    txn = transaction_log.get(transaction_id)
+    if not txn:
+        return jsonify({"error": "Transaction not found"}), 404
+
+    reversal_info = None
+    if getattr(txn, "reversed_at", None):
+        reversal_info = {
+            "reversed_at":       txn.reversed_at,
+            "reversal_amount":   getattr(txn, "reversal_amount", None),
+            "reversal_amount_formatted": (
+                "{:.2f}".format(txn.reversal_amount / 100)
+                if getattr(txn, "reversal_amount", None) else None
+            ),
+            "is_partial_reversal": getattr(txn, "is_partial_reversal", False),
+            "reversal_rrn":      getattr(txn, "reversal_rrn", None),
+            "reversal_terminal_id": getattr(txn, "reversal_terminal_id", None),
+        }
+
+    return jsonify({
+        "transaction_id": txn.id,
+        "rrn":            txn.rrn,
+        "summary": {
+            "status":         txn.status,
+            "response_code":  txn.response_code,
+            "amount":         txn.amount,
+            "amount_formatted": "{:.2f}".format(txn.amount / 100),
+            "currency":       txn.currency,
+            "pan_masked":     "*" * (len(txn.pan) - 4) + txn.pan[-4:],
+            "terminal_id":    txn.terminal_id,
+            "merchant_id":    txn.merchant_id,
+            "merchant_name":  txn.merchant_name,
+            "created_at":     txn.created_at,
+            "processed_at":   txn.processed_at,
+            "auth_code":      txn.auth_code,
+            "amount_tier":    txn.amount_tier,
+            "risk_level":     txn.risk_level,
+            "auth_path":      txn.auth_path,
+            "cb_scheme":      txn.cb_scheme,
+            "cb_brand":       txn.cb_brand,
+            "cb_sca_exemption": txn.cb_sca_exemption,
+        },
+        "events":         getattr(txn, "events", []),
+        "event_count":    len(getattr(txn, "events", [])),
+        "reversal":       reversal_info,
+    })
+
+
+@app.route("/api/v1/transactions/search", methods=["POST"])
+def search_transactions():
+    """
+    Recherche multi-critères de transactions.
+    Corps JSON :
+    {
+        "status": "APPROVED",
+        "tier": "MEDIUM",
+        "date_from": "2026-01-01T00:00:00",
+        "date_to":   "2026-12-31T23:59:59",
+        "amount_min": 1000,
+        "amount_max": 50000,
+        "terminal_id": "TERM0001",
+        "merchant_id": "MERCH001",
+        "cb_scheme": "VISA",
+        "auth_path": "ONLINE",
+        "rrn": "...",
+        "limit": 50,
+        "offset": 0
+    }
+    """
+    data = request.get_json() or {}
+    try:
+        limit  = min(int(data.get("limit",  50)), 200)
+        offset = int(data.get("offset", 0))
+    except (ValueError, TypeError):
+        return jsonify({"error": "limit/offset must be integers"}), 400
+
+    filter_keys = ["status", "tier", "date_from", "date_to",
+                   "terminal_id", "merchant_id", "cb_scheme", "auth_path", "rrn"]
+    filters = {k: data[k] for k in filter_keys if k in data and data[k] is not None}
+
+    for fld in ("amount_min", "amount_max"):
+        if fld in data and data[fld] is not None:
+            try:
+                filters[fld] = int(data[fld])
+            except (ValueError, TypeError):
+                return jsonify({"error": f"{fld} must be an integer (centimes)"}), 400
+
+    transactions = transaction_log.get_all(limit=limit, offset=offset, **filters)
+    total        = transaction_log.count(**filters)
+
+    return jsonify({
+        "transactions":   [t.to_dict() for t in transactions],
+        "count":          len(transactions),
+        "total_matching": total,
+        "limit":          limit,
+        "offset":         offset,
+        "criteria":       filters,
     })
 
 
@@ -1934,6 +2092,74 @@ def create_card():
     )
     card_db.add_card(card)
     return jsonify({"message": "Card created", "card": card.to_dict(masked=True)}), 201
+
+
+@app.route("/api/v1/cards/<pan>", methods=["PATCH"])
+def update_card(pan):
+    """
+    Met à jour les paramètres modifiables d'une carte.
+    Corps JSON (tous optionnels) :
+      { "balance": 100000, "daily_limit": 200000,
+        "cardholder_name": "JEAN DUPONT", "pin_tries": 0 }
+    """
+    pan = pan.replace(" ", "")
+    card = card_db.get_card(pan)
+    if not card:
+        return jsonify({"error": "Card not found"}), 404
+    data = request.get_json() or {}
+    updated = []
+    for field, cast in [("balance", int), ("daily_limit", int),
+                        ("daily_spent", int), ("pin_tries", int)]:
+        if field in data:
+            try:
+                setattr(card, field, cast(data[field]))
+                updated.append(field)
+            except (ValueError, TypeError):
+                return jsonify({"error": f"Champ '{field}' invalide"}), 400
+    if "cardholder_name" in data:
+        card.cardholder_name = str(data["cardholder_name"]).upper()
+        updated.append("cardholder_name")
+    return jsonify({
+        "message": f"{len(updated)} champ(s) mis à jour",
+        "updated_fields": updated,
+        "card": card.to_dict(masked=True),
+    })
+
+
+@app.route("/api/v1/cards/<pan>/history", methods=["GET"])
+def get_card_history(pan):
+    """
+    Historique complet d'une carte : blocages, déblocages,
+    et statistiques des transactions associées.
+    """
+    pan = pan.replace(" ", "")
+    card = card_db.get_card(pan)
+    if not card:
+        return jsonify({"error": "Card not found"}), 404
+
+    txns = transaction_log.get_by_pan(pan, limit=500)
+    txn_stats = {
+        "total": len(txns),
+        "approved": sum(1 for t in txns if t.status == "APPROVED"),
+        "declined": sum(1 for t in txns if t.status == "DECLINED"),
+        "reversed": sum(1 for t in txns if t.status == "REVERSED"),
+        "total_amount_approved": sum(
+            t.amount for t in txns if t.status == "APPROVED"),
+        "total_amount_reversed": sum(
+            getattr(t, "reversal_amount", None) or t.amount
+            for t in txns if t.status == "REVERSED"),
+        "last_transaction_at": txns[0].created_at if txns else None,
+    }
+
+    return jsonify({
+        "pan": "*" * (len(pan) - 4) + pan[-4:],
+        "cardholder_name": card.cardholder_name,
+        "current_status":  card.status,
+        "created_at":      card.created_at,
+        "block_history":   card.block_history,
+        "transaction_stats": txn_stats,
+        "recent_transactions": [t.to_dict() for t in txns[:20]],
+    })
 
 
 @app.route("/api/v1/cards/<pan>/block", methods=["POST"])

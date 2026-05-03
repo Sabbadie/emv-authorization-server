@@ -39,6 +39,8 @@ class Transaction:
         self.processed_at = None
         self.decline_reason = None
         self.rrn = self._generate_rrn()
+        # Journal d'audit
+        self.events = []
         # Redressements
         self.reversed_at = None
         self.reversal_amount = None
@@ -77,6 +79,17 @@ class Transaction:
         self.response_code = response_code
         self.decline_reason = reason
         self.processed_at = datetime.utcnow().isoformat()
+
+    def log_event(self, stage: str, message: str,
+                  level: str = "INFO", data: dict | None = None):
+        """Ajoute un événement d'audit au journal de la transaction."""
+        self.events.append({
+            "stage":   stage,
+            "at":      datetime.utcnow().isoformat(),
+            "level":   level,
+            "message": message,
+            "data":    data or {},
+        })
 
     def error(self, reason):
         self.status = TransactionStatus.ERROR
@@ -162,14 +175,61 @@ class TransactionLog:
         ids = self._pan_index.get(pan, [])
         return [self._transactions[i] for i in ids[-limit:] if i in self._transactions]
 
-    def get_all(self, limit=100, offset=0, status=None, tier=None):
+    def get_by_rrn(self, rrn: str):
+        """Retrouve une transaction par son RRN (Retrieval Reference Number)."""
+        for txn in self._transactions.values():
+            if txn.rrn == rrn:
+                return txn
+        return None
+
+    def get_all(self, limit=100, offset=0, status=None, tier=None,
+                date_from=None, date_to=None,
+                amount_min=None, amount_max=None,
+                terminal_id=None, merchant_id=None,
+                cb_scheme=None, auth_path=None, rrn=None):
         all_txns = list(self._transactions.values())
         if status:
             all_txns = [t for t in all_txns if t.status == status.upper()]
         if tier:
             all_txns = [t for t in all_txns if t.amount_tier == tier.upper()]
+        if date_from:
+            all_txns = [t for t in all_txns if t.created_at >= date_from]
+        if date_to:
+            all_txns = [t for t in all_txns if t.created_at <= date_to]
+        if amount_min is not None:
+            all_txns = [t for t in all_txns if t.amount >= amount_min]
+        if amount_max is not None:
+            all_txns = [t for t in all_txns if t.amount <= amount_max]
+        if terminal_id:
+            all_txns = [t for t in all_txns
+                        if (t.terminal_id or "").lower() == terminal_id.lower()]
+        if merchant_id:
+            all_txns = [t for t in all_txns
+                        if (t.merchant_id or "").lower() == merchant_id.lower()]
+        if cb_scheme:
+            all_txns = [t for t in all_txns
+                        if (t.cb_scheme or "").upper() == cb_scheme.upper()]
+        if auth_path:
+            all_txns = [t for t in all_txns
+                        if (t.auth_path or "").upper() == auth_path.upper()]
+        if rrn:
+            all_txns = [t for t in all_txns if t.rrn == rrn]
         all_txns.sort(key=lambda t: t.created_at, reverse=True)
         return all_txns[offset:offset + limit]
+
+    def count(self, status=None, tier=None, date_from=None, date_to=None,
+              amount_min=None, amount_max=None,
+              terminal_id=None, merchant_id=None,
+              cb_scheme=None, auth_path=None, rrn=None) -> int:
+        """Compte les transactions correspondant aux filtres sans les paginer."""
+        return len(self.get_all(
+            limit=999999, offset=0,
+            status=status, tier=tier,
+            date_from=date_from, date_to=date_to,
+            amount_min=amount_min, amount_max=amount_max,
+            terminal_id=terminal_id, merchant_id=merchant_id,
+            cb_scheme=cb_scheme, auth_path=auth_path, rrn=rrn,
+        ))
 
     def get_stats(self):
         total = len(self._transactions)
