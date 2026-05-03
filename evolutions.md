@@ -1,7 +1,7 @@
 # Évolutions — Serveur d'Autorisation EMV GIE CB
 
-> Dernière mise à jour : **03 mai 2026** — Version courante : **v1.6.0**  
-> Suite de tests : **1 273 tests** (toutes catégories)  
+> Dernière mise à jour : **03 mai 2026** — Version courante : **v1.7.0**  
+> Suite de tests : **1 404 tests** (toutes catégories)  
 > Légende : ✅ Livré · ⚠️ Partiel · ❌ Non démarré  
 > Priorité : 🔴 Haute · 🟡 Moyenne · 🟢 Basse
 
@@ -36,8 +36,8 @@
 | # | Priorité | Évolution | Statut | Version | Notes |
 |---|----------|-----------|--------|---------|-------|
 | E1 | 🔴 | **Vérification CVV/CVC** | ✅ Livré | v1.2.0 | `emv/cvv.py` : CVV1 (piste 2), CVV2 (DOS), iCVV (puce) via 3DES. |
-| E2 | 🔴 | **3-D Secure 2.x (3DS2)** | ❌ Non démarré | — | Flux DSP2 AReq/ARes/CReq/CRes non implémenté. |
-| E3 | 🟡 | **DDA / CDA** | ❌ Non démarré | — | Authentification dynamique (RSA par carte) non simulée. |
+| E2 | 🔴 | **3-D Secure 2.x (3DS2)** | ✅ Livré | v1.7.0 | `emv/threeds.py` : machine d'états AReq→ARes→CReq→CRes. Frictionless vs Challenge. Exemptions DSP2 : LVP (≤30€), TRA (≤250€ historique OK), MIT, CORP. ECI 05/06/07. CAVV simulé (HMAC-SHA256). OTP 4 chiffres, 3 tentatives max. Endpoints REST : `POST /api/v1/3ds/authenticate`, `POST /api/v1/3ds/<id>/challenge`, `GET /api/v1/3ds/<id>`, `GET /api/v1/3ds`, `GET /api/v1/3ds/stats`. 44 tests. |
+| E3 | 🟡 | **DDA / CDA** | ✅ Livré | v1.7.0 | `emv/dda_cda.py` : DDA = signe données dynamiques avec ICC private key (tag 9F4B SDAD) ; CDA = DDA + ARQC inclus (tag 9F27 bit 0x40). Vérification RSA PKCS#1 v1.5 / SHA-256. Intégré dans `authorize()` step 4b (non bloquant). Tags parsés dans champ 55 : 9F4B, 9F46, 90. Endpoints : `POST /api/v1/dda/sign`, `POST /api/v1/dda/verify`, `POST /api/v1/cda/sign`, `POST /api/v1/cda/verify`. 34 tests. |
 | E4 | 🟡 | **Préautorisation + capture différée** | ✅ Livré | v1.5.0 | `emv/preauth.py` : MTI 0100/0200/0400. Statuts PENDING/CAPTURED/PARTIAL/CANCELLED/EXPIRED. Capture partielle. 34 tests. |
 | E5 | 🟡 | **Redressements et avis** | ✅ Livré | v1.3.1 | `emv/reversal.py` : complet, partiel, avis (0420). TCP MTI 0400→0410 et 0420→0430. 74 tests. |
 | E6 | 🟡 | **Disputes / chargebacks** | ✅ Livré | v1.5.0 | `emv/chargeback.py` : MTI 0620/0630. 12 codes motif CB01–CB12. Résolution ACCEPTED/REJECTED/ARBITRATION. 37 tests. |
@@ -51,8 +51,8 @@
 | # | Priorité | Évolution | Statut | Version | Notes |
 |---|----------|-----------|--------|---------|-------|
 | C1 | 🔴 | **Simulation flux CB complet** | ⚠️ Partiel | v1.2.0 | `emv/giecb.py` : identification réseau, règles sans contact, cumul offline, SCA. |
-| C2 | 🟡 | **Certificats émetteurs CB** | ❌ Non démarré | — | PKI simulée non intégrée. |
-| C3 | 🟡 | **CB-PAY / Wallet NFC** | ❌ Non démarré | — | Tokens HCE non implémentés. |
+| C2 | 🟡 | **Certificats émetteurs CB** | ✅ Livré | v1.7.0 | `emv/pki.py` : PKI simulée hiérarchie CA Root → Issuer (par premier chiffre BIN) → ICC (par PAN). RSA 1024-bit via `cryptography`. Tags EMV : `0x8F` (CA PK Index), `0x90` (Issuer PK Cert), `0x9F32` (Issuer PK Exponent), `0x9F46` (ICC PK Cert), `0x9F47` (ICC PK Exponent). Clés mises en cache (lazy init). Endpoints : `GET /api/v1/pki/<pan>`, `GET /api/v1/pki/status`. 25 tests. |
+| C3 | 🟡 | **CB-PAY / Wallet NFC** | ✅ Livré | v1.7.0 | `emv/tokenization.py` : Token Service Provider simulé. Token HCE format PAN LUHN-valide, préfixe 4999. Token Vault en mémoire PAN↔Token (hash SHA-256). Domaines : HCE_MOBILE, ECOMMERCE, WALLET, ANY. Cycle de vie ACTIVE→SUSPENDED→DELETED. Détokenisation transparente dans `authorize()` step 0 (avant blacklist). Compteur d'utilisations (max_uses). Endpoints CRUD : `POST /api/v1/tokens`, `GET /api/v1/tokens`, `GET /api/v1/tokens/<id>`, `POST /api/v1/tokens/<id>/suspend`, `POST /api/v1/tokens/<id>/resume`, `DELETE /api/v1/tokens/<id>`, `GET /api/v1/tokens/pan/<pan>`, `GET /api/v1/tokens/stats`. 56 tests. |
 | C4 | 🟡 | **Issuer Script Processing (tag 71/72)** | ✅ Livré | v1.5.0 | `emv/issuer_scripts.py` : génération Tag 71 (avant transaction) / Tag 72 (après). UNBLOCK_PIN, UPDATE_RISK_PARAMS, PUT_DATA. Export hex + base64. 26 tests. |
 | C5 | 🟢 | **Scoring risque temps réel** | ✅ Livré | v1.5.0 | `emv/risk_scoring.py` : 5 facteurs (montant 30pts, vélocité 25pts, MCC 20pts, sans-contact 15pts, horaire 10pts). Niveaux LOW/MEDIUM/HIGH/CRITICAL. Décisions ALLOW/CHALLENGE/BLOCK. 32 tests. |
 
@@ -79,7 +79,7 @@
 | A2 | 🟡 | **Mode dégradé simulé** | ❌ Non démarré | — | Injection d'erreurs réseau / timeouts aléatoires non implémentée. |
 | A3 | 🟡 | **Configuration YAML/TOML rechargeable** | ❌ Non démarré | — | Paramètres dans `config.py` via variables d'environnement. Rechargement à chaud non supporté. |
 | A4 | 🟢 | **Client Python CLI** | ✅ Livré | v1.3.0 | `cli.py` : envoi d'autorisations, consultation transactions et stats. |
-| A5 | 🟢 | **Tests unitaires et d'intégration** | ✅ Livré | v1.6.0 | **1 273 tests** dans 23 fichiers. Crypto, TLV, CB rules, tranches, REST, TCP, chargebacks, préauths, BIN blacklist, devises, issuer scripts, risk scoring, webhooks, schemas Pydantic, alertes D5, ORM SQLAlchemy. Couverture > 90 %. |
+| A5 | 🟢 | **Tests unitaires et d'intégration** | ✅ Livré | v1.7.0 | **1 404 tests** dans 27 fichiers. Crypto, TLV, CB rules, tranches, REST, TCP, chargebacks, préauths, BIN blacklist, devises, issuer scripts, risk scoring, webhooks, schemas Pydantic, alertes D5, ORM SQLAlchemy, 3DS2 (44), tokenisation (56), PKI (25), DDA/CDA (34). Couverture > 90 %. |
 | A6 | 🟢 | **Conteneurisation Docker** | ✅ Livré | v1.4.0 | `Dockerfile` multi-stage, `docker-compose.yml` avec ports 5000/8583, volume persistance, healthcheck. |
 
 ---
@@ -105,12 +105,12 @@
 |-----|-------|---------|-------------|-------|
 | Sécurité | 5 | 0 | 1 | 6 |
 | Persistance | 3 | 0 | 1 | 4 |
-| EMV | 6 | 0 | 2 | 8 |
-| GIE CB | 2 | 1 | 2 | 5 |
+| EMV | 8 | 0 | 0 | 8 |
+| GIE CB | 4 | 1 | 0 | 5 |
 | Dashboard | 6 | 0 | 0 | 6 |
 | Architecture | 4 | 0 | 2 | 6 |
 | Hors roadmap | 8 | — | — | 8 |
-| **Total** | **34** | **1** | **8** | **43** |
+| **Total** | **38** | **1** | **4** | **43** |
 
 ---
 
@@ -126,4 +126,4 @@
 
 ---
 
-*Roadmap initiée le 02/05/2026 — mise à jour le 03/05/2026 · v1.6.0*
+*Roadmap initiée le 02/05/2026 — mise à jour le 03/05/2026 · v1.7.0*

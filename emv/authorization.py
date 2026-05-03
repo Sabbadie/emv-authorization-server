@@ -23,7 +23,9 @@ logger = logging.getLogger(__name__)
 class AuthorizationResult:
     def __init__(self, approved, response_code, auth_code=None,
                  issuer_auth_data=None, arpc=None, message=None,
-                 transaction=None, amount_decision=None, cb_result=None):
+                 transaction=None, amount_decision=None, cb_result=None,
+                 token_used=False, token_id=None, original_token=None,
+                 threeds_id=None, offline_auth_result=None):
         self.approved = approved
         self.response_code = response_code
         self.auth_code = auth_code
@@ -33,6 +35,11 @@ class AuthorizationResult:
         self.transaction = transaction
         self.amount_decision = amount_decision
         self.cb_result = cb_result
+        self.token_used = token_used
+        self.token_id = token_id
+        self.original_token = original_token
+        self.threeds_id = threeds_id
+        self.offline_auth_result = offline_auth_result
         self._tpa = None
 
     @property
@@ -63,6 +70,14 @@ class AuthorizationResult:
             result["transaction"] = self.transaction.to_dict()
         if include_tpa and self.tpa:
             result["tpa_response"] = self.tpa.to_dict(include_definitions=True)
+        # E2/C3/E3 extensions
+        if self.token_used:
+            result["token_used"]     = True
+            result["token_id"]       = self.token_id
+        if self.threeds_id:
+            result["threeds_id"]     = self.threeds_id
+        if self.offline_auth_result:
+            result["offline_auth"]   = self.offline_auth_result
         return result
 
 
@@ -106,6 +121,10 @@ def _parse_emv_field55(field_55_hex):
             # Champs CB spécifiques
             "consecutive_txn_limit": get_value("9F53"),
             "cumulative_total_limit": get_value("9F54"),
+            # E3 — DDA/CDA
+            "sdad": get_value("9F4B"),          # Signed Dynamic Application Data
+            "issuer_pk_cert": get_value("90"),  # Certificat PK émetteur
+            "icc_pk_cert": get_value("9F46"),   # Certificat PK carte
             "all_fields": fields,
         }
     except Exception as e:
@@ -153,8 +172,40 @@ def check_tvr(tvr_bytes):
 def authorize(pan, amount, currency, transaction_type,
               field_55=None, terminal_id=None, merchant_id=None,
               merchant_name=None, pos_entry_mode="05",
-              skip_crypto=False, mcc=None, is_contactless=False):
+              skip_crypto=False, mcc=None, is_contactless=False,
+              threeds_id=None, skip_dda=False):
     pan = pan.replace(" ", "")
+
+    # ── C3 — Détokenisation HCE/NFC ──────────────────────────────────────────
+    token_used    = False
+    original_token = None
+    token_id       = None
+    try:
+        from emv.tokenization import is_token, detokenize, use_token, get_token
+        if is_token(pan):
+            real_pan = detokenize(pan)
+            if real_pan:
+                original_token = pan
+                meta = get_token(pan)
+                token_id = meta["id"] if meta else None
+                pan = real_pan
+                use_token(original_token)
+                token_used = True
+            else:
+                # Token inconnu / expiré → refus
+                txn_tmp = Transaction(
+                    pan=pan, amount=amount, currency=currency,
+                    transaction_type=transaction_type,
+                    terminal_id=terminal_id, merchant_id=merchant_id,
+                    merchant_name=merchant_name, pos_entry_mode=pos_entry_mode)
+                txn_tmp.decline("55", "Token HCE invalide ou expiré")
+                transaction_log.add(txn_tmp)
+                return AuthorizationResult(False, "55",
+                                           message="Token HCE invalide ou expiré",
+                                           transaction=txn_tmp)
+    except ImportError:
+        pass
+
     txn = Transaction(
         pan=pan, amount=amount, currency=currency,
         transaction_type=transaction_type,
@@ -173,6 +224,9 @@ def authorize(pan, amount, currency, transaction_type,
         "pos_entry_mode": pos_entry_mode,
         "is_contactless": is_contactless,
         "has_emv_data": bool(field_55),
+        "token_used": token_used,
+        "token_id": token_id,
+        "threeds_id": threeds_id,
     })
 
     # ── 0. Vérification blackliste BIN/PAN (E7) ───────────────────────────────
@@ -477,6 +531,21 @@ def authorize(pan, amount, currency, transaction_type,
     else:
         txn.log_event("EMV_PARSING", "Aucun champ 55 — transaction non-EMV")
 
+    # ── 4b. E3 — Vérification DDA/CDA offline (non bloquante) ────────────────
+    offline_auth_result = None
+    if field_55 and emv_parsed:
+        try:
+            from emv.dda_cda import verify_offline_auth
+            offline_auth_result = verify_offline_auth(pan, emv_parsed, skip=skip_dda)
+            oa_type  = offline_auth_result.get("auth_type", "NONE")
+            oa_valid = offline_auth_result.get("valid", True)
+            txn.log_event("OFFLINE_AUTH",
+                          f"Auth offline {oa_type} : {'OK' if oa_valid else 'ÉCHEC (non bloquant)'}",
+                          level="INFO" if oa_valid else "WARN",
+                          data=offline_auth_result)
+        except Exception as _e:
+            logger.debug("DDA/CDA skip (module indisponible) : %s", _e)
+
     # ── 5. Contrôle provision ─────────────────────────────────────────────────
     txn.log_event("BALANCE_CHECK",
                   "Solde suffisant" if card.can_spend(amount)
@@ -573,4 +642,7 @@ def authorize(pan, amount, currency, transaction_type,
         True, "00", auth_code=auth_code,
         issuer_auth_data=issuer_auth_data_hex, arpc=arpc_hex,
         transaction=txn, amount_decision=amount_decision,
-        cb_result=cb_result)
+        cb_result=cb_result,
+        token_used=token_used, token_id=token_id,
+        threeds_id=threeds_id,
+        offline_auth_result=offline_auth_result)

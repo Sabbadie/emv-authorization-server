@@ -1,4 +1,4 @@
-# EMV Authorization Server — v1.6.0
+# EMV Authorization Server — v1.7.0
 
 Serveur d'autorisation EMV complet conforme aux normes EMV 4.3 et ISO 8583,
 développé en Python/Flask. Deux interfaces : REST HTTP (port 5000) et TCP ISO 8583
@@ -37,6 +37,10 @@ emv-auth-server/
 │   ├── risk_scoring.py     # Scoring risque temps réel (C5)
 │   ├── webhooks.py         # Webhooks sortants asynchrones (A1)
 │   ├── alerts.py           # Alertes visuelles D5 (7 types, 3 niveaux)
+│   ├── threeds.py          # 3-D Secure 2.x — AReq/ARes/CReq/CRes (E2)
+│   ├── pki.py              # PKI simulée CA→Issuer→ICC RSA 1024-bit (C2)
+│   ├── dda_cda.py          # DDA/CDA authentification offline RSA (E3)
+│   ├── tokenization.py     # Token HCE/NFC CB-PAY — Token Vault (C3)
 │   └── tcp_server.py       # Serveur TCP ISO 8583 (port 8583)
 ├── iso8583/
 │   └── message.py          # Messages ISO 8583
@@ -49,12 +53,16 @@ emv-auth-server/
 │   └── tpa_response.py     # Décomposition réponse TPA
 ├── tools/
 │   └── terminal_simulator.py  # Client TCP simulateur terminal
-└── tests/                  # 23 fichiers, 1273 tests
+└── tests/                  # 27 fichiers, 1404 tests
     ├── test_api.py               # Tests API REST
     ├── test_authorization.py     # Tests logique d'autorisation
     ├── test_schemas.py           # Tests Pydantic S4 (57 tests)
     ├── test_alerts.py            # Tests alertes D5 (23 tests)
     ├── test_database.py          # Tests ORM + db_health P1 (13 tests)
+    ├── test_threeds.py           # Tests 3DS2 E2 (44 tests)
+    ├── test_tokenization.py      # Tests tokenisation HCE C3 (56 tests)
+    ├── test_pki.py               # Tests PKI C2 (25 tests)
+    ├── test_dda_cda.py           # Tests DDA/CDA E3 (34 tests)
     ├── test_transaction_log.py   # Tests journal d'audit
     ├── test_reversal.py          # Tests redressements (74 tests)
     ├── test_tcp_server.py        # Tests interface TCP
@@ -168,20 +176,21 @@ Protocole : préfixe 4 octets big-endian + corps JSON UTF-8.
 | `API_KEY` | _(vide)_ | Clé API (header `X-API-Key`) |
 | `FLASK_ENV` | `production` | Environnement Flask |
 
-## Nouvelles fonctionnalités v1.6.0
+## Nouvelles fonctionnalités v1.7.0
 
-| Feature | Description |
-|---------|-------------|
-| **S4 Pydantic** | Validation stricte de toutes les entrées `/authorize`. HTTP 422 avec détail des erreurs. 14 schémas. |
-| **P1 PostgreSQL** | SQLAlchemy 2.0 + Alembic. Activation conditionnelle `DATABASE_URL`. Fallback in-memory transparent. |
-| **D5 Alertes** | `GET /api/v1/alerts` : 7 types, 3 niveaux. Banner CSS rouge/orange/bleu. Polling 30 s. |
-| **/health étendu** | Champ `database` dans la réponse health (mode, url, available). Version `1.6.0`. |
+| Feature | Module | Endpoints REST |
+|---------|--------|---------------|
+| **E2 — 3DS2** | `emv/threeds.py` | `POST /api/v1/3ds/authenticate` · `POST /api/v1/3ds/<id>/challenge` · `GET /api/v1/3ds/<id>` · `GET /api/v1/3ds` · `GET /api/v1/3ds/stats` |
+| **C2 — PKI CB** | `emv/pki.py` | `GET /api/v1/pki/<pan>` · `GET /api/v1/pki/status` |
+| **E3 — DDA/CDA** | `emv/dda_cda.py` | `POST /api/v1/dda/sign` · `POST /api/v1/dda/verify` · `POST /api/v1/cda/sign` · `POST /api/v1/cda/verify` |
+| **C3 — HCE/NFC** | `emv/tokenization.py` | `POST /api/v1/tokens` · `GET /api/v1/tokens` · `GET /api/v1/tokens/<id>` · `POST /api/v1/tokens/<id>/suspend` · `POST /api/v1/tokens/<id>/resume` · `DELETE /api/v1/tokens/<id>` · `GET /api/v1/tokens/pan/<pan>` · `GET /api/v1/tokens/stats` |
 
 ## Lancer les tests
 
 ```bash
-python -m pytest tests/ -q          # 1273 tests, ~18 s
-python -m pytest tests/test_schemas.py -v      # validation Pydantic S4
-python -m pytest tests/test_alerts.py -v       # alertes visuelles D5
-python -m pytest tests/test_database.py -v     # ORM + db_health P1
+python -m pytest tests/ -q              # 1404 tests, ~18 s
+python -m pytest tests/test_threeds.py       # 3DS2 E2 (44 tests)
+python -m pytest tests/test_tokenization.py  # Tokenisation C3 (56 tests)
+python -m pytest tests/test_pki.py           # PKI CB C2 (25 tests)
+python -m pytest tests/test_dda_cda.py       # DDA/CDA E3 (34 tests)
 ```

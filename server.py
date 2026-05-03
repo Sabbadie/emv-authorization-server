@@ -37,6 +37,16 @@ from emv.issuer_scripts import generate_scripts
 from emv.webhooks import (notify as webhook_notify, get_log as webhook_get_log,
                            get_events as webhook_get_events, stats as webhook_stats,
                            clear_log as webhook_clear_log)
+from emv.threeds import (authenticate as threeds_authenticate,
+                          submit_challenge as threeds_submit_challenge,
+                          get_session as threeds_get_session,
+                          get_all_sessions as threeds_list_sessions,
+                          get_stats_3ds)
+from emv.tokenization import (create_token, get_token, get_tokens_by_pan,
+                               is_token, suspend_token, resume_token,
+                               delete_token, get_all_tokens, get_token_stats)
+from emv.pki import get_full_pki_info, is_available as pki_is_available
+from emv.dda_cda import sign_dda, verify_dda, sign_cda, verify_cda, is_available_dda_cda
 from iso8583.message import parse_from_dict
 from models.card import card_db, Card, CardStatus
 from models.transaction import transaction_log, TransactionStatus
@@ -2679,6 +2689,271 @@ def test_webhook():
 def clear_webhook_log():
     webhook_clear_log()
     return jsonify({"success": True, "message": "Journal webhook vidé"})
+
+
+# ═══════════════════════════════════════════════════════════════════════════
+# E2 — 3-D Secure 2.x (DSP2/PSD2)
+# ═══════════════════════════════════════════════════════════════════════════
+
+@app.route("/api/v1/3ds/authenticate", methods=["POST"])
+def threeds_auth():
+    """Crée une session d'authentification 3DS2 (AReq→ARes)."""
+    data = request.get_json(silent=True) or {}
+    pan  = data.get("pan", "")
+    if not pan:
+        return jsonify({"error": "pan requis"}), 400
+    pan = pan.replace(" ", "")
+    amount     = int(data.get("amount", 0))
+    currency   = str(data.get("currency", "978"))
+    card_status = "ACTIVE"
+    try:
+        card = card_db.get_card(pan)
+        if card:
+            card_status = card.status.value if hasattr(card.status, "value") else str(card.status)
+    except Exception:
+        pass
+    res = threeds_authenticate(
+        pan=pan,
+        amount=amount,
+        currency=currency,
+        merchant_id=data.get("merchant_id"),
+        merchant_name=data.get("merchant_name"),
+        mcc=data.get("mcc"),
+        card_status=card_status,
+        history_ok=data.get("history_ok", True),
+        force_challenge=data.get("force_challenge", False),
+        exemption_hint=data.get("exemption_hint"),
+    )
+    return jsonify(res), 200
+
+
+@app.route("/api/v1/3ds/<threeds_id>/challenge", methods=["POST"])
+def threeds_challenge(threeds_id):
+    """Soumet la réponse au challenge (CReq→CRes)."""
+    data = request.get_json(silent=True) or {}
+    otp  = str(data.get("otp", ""))
+    if not otp:
+        return jsonify({"error": "otp requis"}), 400
+    res = threeds_submit_challenge(threeds_id, otp)
+    if "error" in res and "introuvable" in res.get("error", ""):
+        return jsonify(res), 404
+    return jsonify(res), 200
+
+
+@app.route("/api/v1/3ds/<threeds_id>", methods=["GET"])
+def threeds_get(threeds_id):
+    """Récupère une session 3DS2 par ID."""
+    session = threeds_get_session(threeds_id)
+    if session is None:
+        return jsonify({"error": "Session 3DS2 introuvable", "id": threeds_id}), 404
+    return jsonify(session), 200
+
+
+@app.route("/api/v1/3ds", methods=["GET"])
+def threeds_list():
+    """Liste les sessions 3DS2 récentes."""
+    status = request.args.get("status")
+    limit  = int(request.args.get("limit", 50))
+    offset = int(request.args.get("offset", 0))
+    sessions = threeds_list_sessions(limit=limit, offset=offset, status=status)
+    stats    = get_stats_3ds()
+    return jsonify({"sessions": sessions, "stats": stats,
+                    "total": stats["total"], "limit": limit, "offset": offset}), 200
+
+
+@app.route("/api/v1/3ds/stats", methods=["GET"])
+def threeds_stats():
+    """Statistiques agrégées 3DS2."""
+    return jsonify(get_stats_3ds()), 200
+
+
+# ═══════════════════════════════════════════════════════════════════════════
+# C3 — Tokenisation HCE / NFC CB-PAY
+# ═══════════════════════════════════════════════════════════════════════════
+
+@app.route("/api/v1/tokens", methods=["POST"])
+def tokens_create():
+    """Crée un token HCE/NFC pour un PAN."""
+    data = request.get_json(silent=True) or {}
+    pan  = data.get("pan", "").replace(" ", "")
+    if not pan:
+        return jsonify({"error": "pan requis"}), 400
+    try:
+        tok = create_token(
+            pan=pan,
+            domain=data.get("domain", "HCE_MOBILE"),
+            device_info=data.get("device_info"),
+            requestor_id=data.get("requestor_id"),
+            max_uses=data.get("max_uses"),
+        )
+        return jsonify(tok), 201
+    except Exception as e:
+        return jsonify({"error": str(e)}), 500
+
+
+@app.route("/api/v1/tokens", methods=["GET"])
+def tokens_list():
+    """Liste les tokens (actifs + suspendus par défaut)."""
+    status = request.args.get("status")
+    domain = request.args.get("domain")
+    limit  = int(request.args.get("limit", 50))
+    offset = int(request.args.get("offset", 0))
+    tokens = get_all_tokens(limit=limit, offset=offset, status=status, domain=domain)
+    stats  = get_token_stats()
+    return jsonify({"tokens": tokens, "stats": stats,
+                    "limit": limit, "offset": offset}), 200
+
+
+@app.route("/api/v1/tokens/stats", methods=["GET"])
+def tokens_stats():
+    """Statistiques du Token Vault."""
+    return jsonify(get_token_stats()), 200
+
+
+@app.route("/api/v1/tokens/<token_or_id>", methods=["GET"])
+def tokens_get(token_or_id):
+    """Récupère un token par valeur ou par ID."""
+    tok = get_token(token_or_id)
+    if tok is None:
+        return jsonify({"error": "Token introuvable", "id": token_or_id}), 404
+    return jsonify(tok), 200
+
+
+@app.route("/api/v1/tokens/<token_or_id>/suspend", methods=["POST"])
+def tokens_suspend(token_or_id):
+    """Suspend un token actif."""
+    data   = request.get_json(silent=True) or {}
+    reason = data.get("reason")
+    tok    = suspend_token(token_or_id, reason=reason)
+    if tok is None:
+        return jsonify({"error": "Token introuvable"}), 404
+    return jsonify(tok), 200
+
+
+@app.route("/api/v1/tokens/<token_or_id>/resume", methods=["POST"])
+def tokens_resume(token_or_id):
+    """Réactive un token suspendu."""
+    tok = resume_token(token_or_id)
+    if tok is None:
+        return jsonify({"error": "Token introuvable"}), 404
+    return jsonify(tok), 200
+
+
+@app.route("/api/v1/tokens/<token_or_id>", methods=["DELETE"])
+def tokens_delete(token_or_id):
+    """Supprime définitivement un token."""
+    tok = delete_token(token_or_id)
+    if tok is None:
+        return jsonify({"error": "Token introuvable"}), 404
+    return jsonify({"success": True, "token": tok}), 200
+
+
+@app.route("/api/v1/tokens/pan/<path:pan>", methods=["GET"])
+def tokens_by_pan(pan):
+    """Liste les tokens associés à un PAN."""
+    tokens = get_tokens_by_pan(pan.replace(" ", ""))
+    return jsonify({"tokens": tokens, "count": len(tokens)}), 200
+
+
+# ═══════════════════════════════════════════════════════════════════════════
+# C2 — PKI Simulée CB (Certificats Émetteurs)
+# ═══════════════════════════════════════════════════════════════════════════
+
+@app.route("/api/v1/pki/<path:pan>", methods=["GET"])
+def pki_info(pan):
+    """Retourne les informations PKI simulées pour un PAN."""
+    pan = pan.replace(" ", "")
+    if not pki_is_available():
+        return jsonify({"available": False,
+                        "reason": "Module cryptography non installé"}), 503
+    try:
+        info = get_full_pki_info(pan)
+        return jsonify(info), 200
+    except Exception as e:
+        return jsonify({"error": str(e)}), 500
+
+
+@app.route("/api/v1/pki/status", methods=["GET"])
+def pki_status():
+    """Statut de la PKI simulée CB."""
+    return jsonify({
+        "available":   pki_is_available(),
+        "description": "PKI simulée CB — CA Root → Issuer → ICC (RSA 1024-bit)",
+        "key_size":    1024,
+        "hierarchy":   ["CA Root", "Issuer (par BIN)", "ICC (par PAN)"],
+        "tags":        ["0x8F CA PK Index", "0x90 Issuer PK Cert",
+                        "0x9F32 Issuer PK Exponent", "0x9F46 ICC PK Cert",
+                        "0x9F47 ICC PK Exponent"],
+    }), 200
+
+
+# ═══════════════════════════════════════════════════════════════════════════
+# E3 — DDA / CDA Authentification Offline Dynamique
+# ═══════════════════════════════════════════════════════════════════════════
+
+@app.route("/api/v1/dda/sign", methods=["POST"])
+def dda_sign():
+    """Simule la signature DDA par la carte (ICC private key)."""
+    if not is_available_dda_cda():
+        return jsonify({"error": "DDA/CDA non disponible (cryptography requis)"}), 503
+    data = request.get_json(silent=True) or {}
+    pan  = data.get("pan", "").replace(" ", "")
+    if not pan:
+        return jsonify({"error": "pan requis"}), 400
+    un_hex = data.get("unpredictable_number")
+    un     = bytes.fromhex(un_hex) if un_hex else None
+    res    = sign_dda(pan, unpredictable_number=un,
+                      additional_data=bytes.fromhex(data["additional_data"])
+                      if data.get("additional_data") else None)
+    return jsonify(res), 200 if res.get("success") else 400
+
+
+@app.route("/api/v1/dda/verify", methods=["POST"])
+def dda_verify():
+    """Vérifie une signature DDA."""
+    if not is_available_dda_cda():
+        return jsonify({"error": "DDA/CDA non disponible"}), 503
+    data = request.get_json(silent=True) or {}
+    pan      = data.get("pan", "").replace(" ", "")
+    sdad_hex = data.get("sdad_hex", "")
+    un_hex   = data.get("unpredictable_number_hex", "")
+    if not pan or not sdad_hex or not un_hex:
+        return jsonify({"error": "pan, sdad_hex, unpredictable_number_hex requis"}), 400
+    res = verify_dda(pan, sdad_hex, un_hex)
+    return jsonify(res), 200
+
+
+@app.route("/api/v1/cda/sign", methods=["POST"])
+def cda_sign():
+    """Simule la signature CDA par la carte (avec ARQC inclus)."""
+    if not is_available_dda_cda():
+        return jsonify({"error": "CDA non disponible (cryptography requis)"}), 503
+    data = request.get_json(silent=True) or {}
+    pan  = data.get("pan", "").replace(" ", "")
+    if not pan:
+        return jsonify({"error": "pan requis"}), 400
+    un_hex   = data.get("unpredictable_number")
+    un       = bytes.fromhex(un_hex) if un_hex else None
+    arqc_hex = data.get("arqc_hex")
+    cid      = data.get("cryptogram_info")
+    res      = sign_cda(pan, unpredictable_number=un,
+                        arqc_hex=arqc_hex, cryptogram_info=cid)
+    return jsonify(res), 200 if res.get("success") else 400
+
+
+@app.route("/api/v1/cda/verify", methods=["POST"])
+def cda_verify():
+    """Vérifie une signature CDA."""
+    if not is_available_dda_cda():
+        return jsonify({"error": "CDA non disponible"}), 503
+    data     = request.get_json(silent=True) or {}
+    pan      = data.get("pan", "").replace(" ", "")
+    sdad_hex = data.get("sdad_hex", "")
+    un_hex   = data.get("unpredictable_number_hex", "")
+    if not pan or not sdad_hex or not un_hex:
+        return jsonify({"error": "pan, sdad_hex, unpredictable_number_hex requis"}), 400
+    res = verify_cda(pan, sdad_hex, un_hex, arqc_hex=data.get("arqc_hex"))
+    return jsonify(res), 200
 
 
 # ═══════════════════════════════════════════════════════════════════════════
