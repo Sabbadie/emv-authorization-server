@@ -80,3 +80,9 @@ class Config:
     # P2 — Persistance
     SNAPSHOT_ENABLED  = os.getenv("SNAPSHOT_ENABLED", "true").lower() == "true"
     SNAPSHOT_INTERVAL = int(os.getenv("SNAPSHOT_INTERVAL_SECS", 120))
+
+    # A1 — Webhooks sortants (laisser vide pour désactiver)
+    WEBHOOK_URL = os.getenv("WEBHOOK_URL", "")
+
+    # E7 — Blackliste BIN/PAN (codes réponse)
+    BIN_BLACKLIST_RESPONSE_CODE = "63"   # Violation règles de sécurité

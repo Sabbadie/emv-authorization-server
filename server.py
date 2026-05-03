@@ -25,6 +25,18 @@ from emv.giecb import (CB_AIDS, CB_MCC_FLOOR_LIMITS, CB_CONTACTLESS, CB_CAP, CB_
                         CB_RESPONSE_CODES, CB_SCA_EXEMPTIONS, CB_SERVICE_INDICATORS,
                         identify_card, evaluate_cb_rules)
 from emv.cvv import verify_cvv, generate_cvv_set
+from emv.bin_blacklist import bin_blacklist
+from emv.currency import convert as currency_convert, get_rates as currency_get_rates
+from emv.preauth import (create_preauth, capture as capture_preauth,
+                          cancel_preauth, get_preauth, get_all_preauths, count_preauths)
+from emv.chargeback import (create_chargeback, reverse_chargeback, resolve_chargeback,
+                              get_chargeback, get_all_chargebacks, count_chargebacks,
+                              get_chargebacks_by_txn, CHARGEBACK_REASON_CODES)
+from emv.risk_scoring import score_transaction
+from emv.issuer_scripts import generate_scripts
+from emv.webhooks import (notify as webhook_notify, get_log as webhook_get_log,
+                           get_events as webhook_get_events, stats as webhook_stats,
+                           clear_log as webhook_clear_log)
 from iso8583.message import parse_from_dict
 from models.card import card_db, Card, CardStatus
 from models.transaction import transaction_log, TransactionStatus
@@ -1265,7 +1277,7 @@ def health():
     return jsonify({
         "status": "UP",
         "service": "EMV Authorization Server",
-        "version": "1.3.0-GIE-CB",
+        "version": "1.5.0-GIE-CB",
         "timestamp": datetime.utcnow().isoformat() + "Z",
         "api_key_enabled": bool(Config.API_KEY),
         "features": ["EMV 4.3", "ISO 8583", "ARQC/ARPC",
@@ -1274,7 +1286,12 @@ def health():
                      "Rate Limiting S2", "API Key S1",
                      "CSV Export D2", "Batch Sim D4",
                      "SSE Charts D1", "Dark/Light D6",
-                     "JSON Backup P2"],
+                     "JSON Backup P2", "TCP Socket X1",
+                     "Audit Log S6",
+                     "BIN Blacklist E7", "Currency Conversion E8",
+                     "Preauthorization E4", "Chargebacks E6",
+                     "Issuer Scripts C4", "Risk Scoring C5",
+                     "Webhooks A1", "Swagger UI D3"],
     })
 
 
@@ -2195,13 +2212,724 @@ def get_stats():
         "card_stats": card_db.get_stats(),
         "server": {
             "timestamp": datetime.utcnow().isoformat() + "Z",
-            "version": "1.3.0-GIE-CB",
+            "version": "1.5.0-GIE-CB",
             "max_transaction_amount": Config.MAX_TRANSACTION_AMOUNT,
             "daily_limit": Config.DAILY_LIMIT,
             "supported_currencies": Config.CURRENCY_CODES,
             "api_key_enabled": bool(Config.API_KEY),
         },
     })
+
+
+# ═══════════════════════════════════════════════════════════════════════════
+# E7 — Blackliste BIN / PAN
+# ═══════════════════════════════════════════════════════════════════════════
+
+@app.route("/api/v1/bin-blacklist", methods=["GET"])
+def get_bin_blacklist():
+    """Retourne la liste complète des BIN et PAN blacklistés."""
+    return jsonify(bin_blacklist.get_all())
+
+
+@app.route("/api/v1/bin-blacklist/bins", methods=["POST"])
+def add_bin_to_blacklist():
+    data = request.get_json() or {}
+    prefix = data.get("prefix") or data.get("bin")
+    if not prefix:
+        return jsonify({"error": "Champ 'prefix' requis"}), 400
+    try:
+        entry = bin_blacklist.add_bin(
+            bin_prefix=str(prefix),
+            reason=data.get("reason"),
+            added_by=data.get("added_by", "API"),
+        )
+        webhook_notify("bin_blacklist.added", {"type": "BIN", "prefix": prefix})
+        return jsonify({"success": True, "entry": entry}), 201
+    except ValueError as e:
+        return jsonify({"error": str(e)}), 400
+
+
+@app.route("/api/v1/bin-blacklist/bins/<path:prefix>", methods=["DELETE"])
+def remove_bin_from_blacklist(prefix):
+    removed = bin_blacklist.remove_bin(prefix)
+    if not removed:
+        return jsonify({"error": "BIN introuvable dans la blackliste"}), 404
+    webhook_notify("bin_blacklist.removed", {"type": "BIN", "prefix": prefix})
+    return jsonify({"success": True, "message": f"BIN {prefix} retiré de la blackliste"})
+
+
+@app.route("/api/v1/bin-blacklist/pans", methods=["POST"])
+def add_pan_to_blacklist():
+    data = request.get_json() or {}
+    pan = (data.get("pan") or "").replace(" ", "")
+    if not pan:
+        return jsonify({"error": "Champ 'pan' requis"}), 400
+    try:
+        entry = bin_blacklist.add_pan(
+            pan=pan,
+            reason=data.get("reason"),
+            added_by=data.get("added_by", "API"),
+        )
+        webhook_notify("bin_blacklist.added", {"type": "PAN",
+                       "pan_masked": entry["pan_masked"]})
+        return jsonify({"success": True, "entry": entry}), 201
+    except ValueError as e:
+        return jsonify({"error": str(e)}), 400
+
+
+@app.route("/api/v1/bin-blacklist/pans/<path:pan>", methods=["DELETE"])
+def remove_pan_from_blacklist(pan):
+    pan = pan.replace(" ", "")
+    removed = bin_blacklist.remove_pan(pan)
+    if not removed:
+        return jsonify({"error": "PAN introuvable dans la blackliste"}), 404
+    webhook_notify("bin_blacklist.removed", {"type": "PAN"})
+    return jsonify({"success": True, "message": "PAN retiré de la blackliste"})
+
+
+@app.route("/api/v1/bin-blacklist/check", methods=["POST"])
+def check_bin_blacklist():
+    """Vérifie si un PAN est blacklisté sans déclencher de transaction."""
+    data = request.get_json() or {}
+    pan = (data.get("pan") or "").replace(" ", "")
+    if not pan:
+        return jsonify({"error": "Champ 'pan' requis"}), 400
+    is_blocked, block_type, reason = bin_blacklist.is_blacklisted(pan)
+    return jsonify({
+        "pan_masked": "*" * (len(pan) - 4) + pan[-4:] if len(pan) > 4 else pan,
+        "is_blacklisted": is_blocked,
+        "block_type": block_type,
+        "reason": reason,
+    })
+
+
+# ═══════════════════════════════════════════════════════════════════════════
+# E8 — Conversion multi-devises
+# ═══════════════════════════════════════════════════════════════════════════
+
+@app.route("/api/v1/currency/rates", methods=["GET"])
+def get_currency_rates():
+    """Retourne tous les taux de change disponibles."""
+    return jsonify(currency_get_rates())
+
+
+@app.route("/api/v1/currency/convert", methods=["POST"])
+def convert_currency():
+    """
+    Convertit un montant d'une devise à une autre.
+    Body: { amount, from_currency, to_currency }
+    """
+    data = request.get_json() or {}
+    try:
+        amount = int(data.get("amount", 0))
+    except (ValueError, TypeError):
+        return jsonify({"error": "Montant invalide"}), 400
+    from_c = str(data.get("from_currency", "978")).zfill(3)
+    to_c   = str(data.get("to_currency",   "840")).zfill(3)
+    if amount <= 0:
+        return jsonify({"error": "Montant doit être > 0"}), 400
+    try:
+        result = currency_convert(amount, from_c, to_c)
+        return jsonify(result)
+    except ValueError as e:
+        return jsonify({"error": str(e)}), 400
+
+
+# ═══════════════════════════════════════════════════════════════════════════
+# E4 — Préautorisation + capture différée
+# ═══════════════════════════════════════════════════════════════════════════
+
+@app.route("/api/v1/preauthorizations", methods=["POST"])
+def preauthorize_endpoint():
+    """
+    Crée une préautorisation (MTI 0100).
+    La transaction d'autorisation initiale doit être approuvée.
+    Body: { pan, amount, currency, terminal_id?, merchant_id?, expiry_hours? }
+    """
+    data = request.get_json() or {}
+    pan = (data.get("pan") or "").replace(" ", "")
+    if not pan:
+        return jsonify({"error": "PAN requis"}), 400
+    try:
+        amount = int(data.get("amount", 0))
+    except (ValueError, TypeError):
+        return jsonify({"error": "Montant invalide"}), 400
+    if amount <= 0:
+        return jsonify({"error": "Montant invalide"}), 400
+    currency = str(data.get("currency", "978")).zfill(3)
+    result = create_preauth(
+        pan=pan, authorized_amount=amount, currency=currency,
+        terminal_id=data.get("terminal_id"),
+        merchant_id=data.get("merchant_id"),
+        merchant_name=data.get("merchant_name"),
+        original_txn_id=data.get("original_txn_id"),
+        expiry_hours=int(data.get("expiry_hours", 24)),
+        notes=data.get("notes"),
+    )
+    if result.success:
+        webhook_notify("preauth.created", result.preauth.to_dict())
+        return jsonify(result.to_dict()), 201
+    return jsonify(result.to_dict()), 400
+
+
+@app.route("/api/v1/preauthorizations", methods=["GET"])
+def list_preauths():
+    status   = request.args.get("status")
+    limit    = min(int(request.args.get("limit",  50)), 200)
+    offset   = int(request.args.get("offset", 0))
+    preauths = get_all_preauths(limit=limit, offset=offset, status=status)
+    return jsonify({
+        "preauthorizations": [p.to_dict() for p in preauths],
+        "total":  count_preauths(status=status),
+        "limit":  limit,
+        "offset": offset,
+    })
+
+
+@app.route("/api/v1/preauthorizations/<preauth_id>", methods=["GET"])
+def get_preauth_detail(preauth_id):
+    pa = get_preauth(preauth_id)
+    if not pa:
+        return jsonify({"error": "Préautorisation introuvable"}), 404
+    return jsonify(pa.to_dict())
+
+
+@app.route("/api/v1/preauthorizations/<preauth_id>/capture", methods=["POST"])
+def capture_preauth_endpoint(preauth_id):
+    """
+    Capture une préautorisation (MTI 0200).
+    Body: { capture_amount? } — défaut = montant autorisé total.
+    """
+    data = request.get_json() or {}
+    capture_amount = data.get("capture_amount")
+    if capture_amount is not None:
+        try:
+            capture_amount = int(capture_amount)
+        except (ValueError, TypeError):
+            return jsonify({"error": "capture_amount invalide"}), 400
+    result = capture_preauth(preauth_id, capture_amount=capture_amount)
+    if result.success:
+        webhook_notify("preauth.captured", result.preauth.to_dict())
+        return jsonify(result.to_dict())
+    return jsonify(result.to_dict()), 400
+
+
+@app.route("/api/v1/preauthorizations/<preauth_id>/cancel", methods=["POST"])
+def cancel_preauth_endpoint(preauth_id):
+    """Annule une préautorisation avant capture (MTI 0400)."""
+    data = request.get_json() or {}
+    result = cancel_preauth(preauth_id, reason=data.get("reason"))
+    if result.success:
+        webhook_notify("preauth.cancelled", result.preauth.to_dict())
+        return jsonify(result.to_dict())
+    return jsonify(result.to_dict()), 400
+
+
+# ═══════════════════════════════════════════════════════════════════════════
+# E6 — Disputes / Chargebacks
+# ═══════════════════════════════════════════════════════════════════════════
+
+@app.route("/api/v1/chargebacks/reasons", methods=["GET"])
+def get_chargeback_reasons():
+    return jsonify({
+        "reasons": [{"code": k, "label": v}
+                    for k, v in CHARGEBACK_REASON_CODES.items()]
+    })
+
+
+@app.route("/api/v1/transactions/<txn_id>/chargeback", methods=["POST"])
+def open_chargeback(txn_id):
+    """
+    Ouvre un chargeback sur une transaction (MTI 0620).
+    Body: { reason_code, amount?, initiated_by?, notes? }
+    """
+    data = request.get_json() or {}
+    reason_code = data.get("reason_code")
+    if not reason_code:
+        return jsonify({"error": "reason_code requis (CB01–CB12)"}), 400
+    amount = data.get("amount")
+    if amount is not None:
+        try:
+            amount = int(amount)
+        except (ValueError, TypeError):
+            return jsonify({"error": "amount invalide"}), 400
+    result = create_chargeback(
+        transaction_id=txn_id, reason_code=reason_code, amount=amount,
+        initiated_by=data.get("initiated_by"),
+        notes=data.get("notes"),
+    )
+    if result.success:
+        webhook_notify("chargeback.opened", result.chargeback.to_dict())
+        return jsonify(result.to_dict()), 201
+    return jsonify(result.to_dict()), 400
+
+
+@app.route("/api/v1/transactions/<txn_id>/chargebacks", methods=["GET"])
+def get_txn_chargebacks(txn_id):
+    cbs = get_chargebacks_by_txn(txn_id)
+    return jsonify({
+        "transaction_id": txn_id,
+        "chargebacks": [c.to_dict() for c in cbs],
+        "total": len(cbs),
+    })
+
+
+@app.route("/api/v1/chargebacks", methods=["GET"])
+def list_chargebacks():
+    status  = request.args.get("status")
+    limit   = min(int(request.args.get("limit",  50)), 200)
+    offset  = int(request.args.get("offset", 0))
+    cbs = get_all_chargebacks(limit=limit, offset=offset, status=status)
+    return jsonify({
+        "chargebacks": [c.to_dict() for c in cbs],
+        "total":  count_chargebacks(status=status),
+        "limit":  limit,
+        "offset": offset,
+    })
+
+
+@app.route("/api/v1/chargebacks/<cb_id>", methods=["GET"])
+def get_chargeback_detail(cb_id):
+    cb = get_chargeback(cb_id)
+    if not cb:
+        return jsonify({"error": "Chargeback introuvable"}), 404
+    return jsonify(cb.to_dict())
+
+
+@app.route("/api/v1/chargebacks/<cb_id>/reverse", methods=["POST"])
+def reverse_chargeback_endpoint(cb_id):
+    """Annule un chargeback ouvert (MTI 0630)."""
+    data = request.get_json() or {}
+    result = reverse_chargeback(cb_id, notes=data.get("notes"))
+    if result.success:
+        webhook_notify("chargeback.reversed", result.chargeback.to_dict())
+        return jsonify(result.to_dict())
+    return jsonify(result.to_dict()), 400
+
+
+@app.route("/api/v1/chargebacks/<cb_id>/resolve", methods=["POST"])
+def resolve_chargeback_endpoint(cb_id):
+    """
+    Résout un chargeback.
+    Body: { resolution: ACCEPTED|REJECTED|ARBITRATION, notes? }
+    """
+    data = request.get_json() or {}
+    resolution = data.get("resolution")
+    if not resolution:
+        return jsonify({"error": "resolution requis : ACCEPTED|REJECTED|ARBITRATION"}), 400
+    result = resolve_chargeback(cb_id, resolution=resolution, notes=data.get("notes"))
+    if result.success:
+        webhook_notify("chargeback.resolved", result.chargeback.to_dict())
+        return jsonify(result.to_dict())
+    return jsonify(result.to_dict()), 400
+
+
+# ═══════════════════════════════════════════════════════════════════════════
+# C5 — Scoring risque temps réel
+# ═══════════════════════════════════════════════════════════════════════════
+
+@app.route("/api/v1/transactions/<txn_id>/risk-score", methods=["GET"])
+def get_txn_risk_score(txn_id):
+    """Calcule / retourne le score de risque d'une transaction enregistrée."""
+    txn = transaction_log.get(txn_id)
+    if not txn:
+        return jsonify({"error": "Transaction introuvable"}), 404
+    card = card_db.get_card(txn.pan)
+    daily = len(transaction_log.get_by_pan(txn.pan, limit=200))
+    score = score_transaction(
+        pan=txn.pan, amount=txn.amount, currency=txn.currency,
+        mcc=getattr(txn, "mcc", None),
+        is_contactless=getattr(txn, "cb_is_contactless", False),
+        contactless_cumul=card.contactless_cumul if card else 0,
+        consecutive_offline=card.consecutive_offline if card else 0,
+        daily_count=daily,
+    )
+    return jsonify({"transaction_id": txn_id, "risk_score": score})
+
+
+@app.route("/api/v1/risk-score", methods=["POST"])
+def compute_risk_score():
+    """
+    Calcule un score de risque à la volée sans créer de transaction.
+    Body: { pan, amount, currency?, mcc?, is_contactless?, daily_count?, ... }
+    """
+    data = request.get_json() or {}
+    pan = (data.get("pan") or "").replace(" ", "")
+    if not pan:
+        return jsonify({"error": "PAN requis"}), 400
+    try:
+        amount = int(data.get("amount", 0))
+    except (ValueError, TypeError):
+        return jsonify({"error": "Montant invalide"}), 400
+    score = score_transaction(
+        pan=pan,
+        amount=amount,
+        currency=str(data.get("currency", "978")).zfill(3),
+        mcc=data.get("mcc"),
+        is_contactless=bool(data.get("is_contactless", False)),
+        contactless_cumul=int(data.get("contactless_cumul", 0)),
+        consecutive_offline=int(data.get("consecutive_offline", 0)),
+        daily_count=int(data.get("daily_count", 0)),
+        hourly_count=int(data.get("hourly_count", 0)),
+        hour=data.get("hour"),
+    )
+    return jsonify(score)
+
+
+# ═══════════════════════════════════════════════════════════════════════════
+# C4 — Issuer Script Processing (Tag 71 / Tag 72)
+# ═══════════════════════════════════════════════════════════════════════════
+
+@app.route("/api/v1/cards/<pan>/issuer-scripts", methods=["GET"])
+def get_issuer_scripts(pan):
+    """
+    Génère les scripts émetteur EMV (Tag 71/72) pour une carte.
+    Query: ?authorized=true&reason=fraud
+    """
+    pan = pan.replace(" ", "")
+    card = card_db.get_card(pan)
+    if not card:
+        return jsonify({"error": "Carte introuvable"}), 404
+    authorized = request.args.get("authorized", "true").lower() != "false"
+    reason     = request.args.get("reason")
+    scripts = generate_scripts(card, authorized=authorized, reason=reason)
+    masked_pan = "*" * (len(pan) - 4) + pan[-4:]
+    return jsonify({"pan_masked": masked_pan, "scripts": scripts})
+
+
+# ═══════════════════════════════════════════════════════════════════════════
+# A1 — Webhooks sortants
+# ═══════════════════════════════════════════════════════════════════════════
+
+@app.route("/api/v1/webhooks/log", methods=["GET"])
+def get_webhook_log():
+    limit = min(int(request.args.get("limit", 50)), 200)
+    return jsonify({
+        "log": webhook_get_log(limit=limit),
+        "stats": webhook_stats(),
+    })
+
+
+@app.route("/api/v1/webhooks/events", methods=["GET"])
+def get_webhook_events():
+    return jsonify({"events": webhook_get_events()})
+
+
+@app.route("/api/v1/webhooks/stats", methods=["GET"])
+def get_webhook_stats():
+    return jsonify(webhook_stats())
+
+
+@app.route("/api/v1/webhooks/test", methods=["POST"])
+def test_webhook():
+    """
+    Envoie un événement de test vers WEBHOOK_URL.
+    Body: { event?, payload?, webhook_url? }
+    """
+    data  = request.get_json() or {}
+    event = data.get("event", "authorization.approved")
+    url   = data.get("webhook_url") or Config.WEBHOOK_URL or None
+    payload = data.get("payload", {"test": True, "source": "manual-test"})
+    entry = webhook_notify(event, payload, webhook_url=url)
+    return jsonify({
+        "message": "Test webhook envoyé",
+        "url": url or "(WEBHOOK_URL non configuré — ignoré)",
+        "entry": entry,
+    })
+
+
+@app.route("/api/v1/webhooks/log", methods=["DELETE"])
+def clear_webhook_log():
+    webhook_clear_log()
+    return jsonify({"success": True, "message": "Journal webhook vidé"})
+
+
+# ═══════════════════════════════════════════════════════════════════════════
+# D3 — Documentation Swagger / OpenAPI 3.0
+# ═══════════════════════════════════════════════════════════════════════════
+
+@app.route("/api/v1/openapi.json", methods=["GET"])
+def openapi_spec():
+    """Retourne la spécification OpenAPI 3.0 de l'API."""
+    spec = {
+        "openapi": "3.0.3",
+        "info": {
+            "title":   "EMV Authorization Server API",
+            "version": "1.5.0",
+            "description": (
+                "Serveur d'autorisation EMV 4.3 conforme GIE CB. "
+                "Implémente ISO 8583, BER-TLV, ARQC/ARPC, 6 tranches montant, "
+                "règles GIE CB, préautorisation, chargebacks, blackliste BIN, "
+                "conversion devises, issuer scripts Tag 71/72, scoring risque "
+                "et webhooks sortants."
+            ),
+            "contact": {"name": "EMV Auth Server"},
+            "license": {"name": "MIT"},
+        },
+        "servers": [{"url": "/api/v1", "description": "Serveur principal"}],
+        "tags": [
+            {"name": "Autorisation",     "description": "EMV Authorization"},
+            {"name": "Transactions",     "description": "Consultation & recherche"},
+            {"name": "Cartes",           "description": "Gestion des cartes"},
+            {"name": "Préautorisation",  "description": "E4 — MTI 0100/0200"},
+            {"name": "Chargebacks",      "description": "E6 — MTI 0620/0630"},
+            {"name": "BIN Blacklist",    "description": "E7 — Blackliste BIN/PAN"},
+            {"name": "Devises",          "description": "E8 — Conversion multi-devises"},
+            {"name": "Scoring Risque",   "description": "C5 — Score de risque"},
+            {"name": "Issuer Scripts",   "description": "C4 — Tag 71/72"},
+            {"name": "Webhooks",         "description": "A1 — Notifications sortantes"},
+            {"name": "CVV",              "description": "E1 — Vérification CVV/CVC"},
+            {"name": "Monitoring",       "description": "Health, stats, logs"},
+        ],
+        "paths": {
+            "/authorize": {
+                "post": {
+                    "tags": ["Autorisation"],
+                    "summary": "Autoriser une transaction EMV",
+                    "operationId": "authorize",
+                    "requestBody": {"required": True, "content": {"application/json": {"schema": {
+                        "type": "object",
+                        "required": ["pan", "amount"],
+                        "properties": {
+                            "pan":              {"type": "string", "example": "4111111111111111"},
+                            "amount":           {"type": "integer", "description": "Montant en centimes", "example": 5000},
+                            "currency":         {"type": "string", "default": "978", "example": "978"},
+                            "transaction_type": {"type": "string", "default": "00", "example": "00"},
+                            "field_55":         {"type": "string", "description": "Données EMV hex"},
+                            "terminal_id":      {"type": "string"},
+                            "merchant_id":      {"type": "string"},
+                            "is_contactless":   {"type": "boolean"},
+                            "mcc":              {"type": "string", "example": "5411"},
+                            "cvv2":             {"type": "string"},
+                            "expiry_yymm":      {"type": "string", "example": "2612"},
+                        },
+                    }}}},
+                    "responses": {
+                        "200": {"description": "Décision d'autorisation"},
+                        "400": {"description": "Requête invalide"},
+                        "429": {"description": "Rate limit dépassé"},
+                    },
+                }
+            },
+            "/preauthorizations": {
+                "post": {
+                    "tags": ["Préautorisation"],
+                    "summary": "Créer une préautorisation (MTI 0100)",
+                    "operationId": "createPreauth",
+                    "requestBody": {"required": True, "content": {"application/json": {"schema": {
+                        "type": "object", "required": ["pan", "amount", "currency"],
+                        "properties": {
+                            "pan":          {"type": "string"},
+                            "amount":       {"type": "integer"},
+                            "currency":     {"type": "string", "default": "978"},
+                            "terminal_id":  {"type": "string"},
+                            "expiry_hours": {"type": "integer", "default": 24},
+                        },
+                    }}}},
+                    "responses": {"201": {"description": "Préautorisation créée"}, "400": {}},
+                },
+                "get": {
+                    "tags": ["Préautorisation"],
+                    "summary": "Lister les préautorisations",
+                    "parameters": [
+                        {"name": "status", "in": "query", "schema": {"type": "string"}},
+                        {"name": "limit",  "in": "query", "schema": {"type": "integer", "default": 50}},
+                        {"name": "offset", "in": "query", "schema": {"type": "integer", "default": 0}},
+                    ],
+                    "responses": {"200": {"description": "Liste des préautorisations"}},
+                },
+            },
+            "/preauthorizations/{id}/capture": {
+                "post": {
+                    "tags": ["Préautorisation"],
+                    "summary": "Capturer une préautorisation (MTI 0200)",
+                    "parameters": [{"name": "id", "in": "path", "required": True, "schema": {"type": "string"}}],
+                    "requestBody": {"content": {"application/json": {"schema": {
+                        "type": "object",
+                        "properties": {"capture_amount": {"type": "integer"}},
+                    }}}},
+                    "responses": {"200": {"description": "Capture effectuée"}, "400": {}},
+                }
+            },
+            "/preauthorizations/{id}/cancel": {
+                "post": {
+                    "tags": ["Préautorisation"],
+                    "summary": "Annuler une préautorisation (MTI 0400)",
+                    "parameters": [{"name": "id", "in": "path", "required": True, "schema": {"type": "string"}}],
+                    "responses": {"200": {}, "400": {}},
+                }
+            },
+            "/transactions/{id}/chargeback": {
+                "post": {
+                    "tags": ["Chargebacks"],
+                    "summary": "Ouvrir un chargeback (MTI 0620)",
+                    "parameters": [{"name": "id", "in": "path", "required": True, "schema": {"type": "string"}}],
+                    "requestBody": {"required": True, "content": {"application/json": {"schema": {
+                        "type": "object", "required": ["reason_code"],
+                        "properties": {
+                            "reason_code":   {"type": "string", "example": "CB01"},
+                            "amount":        {"type": "integer"},
+                            "initiated_by":  {"type": "string", "default": "PORTEUR"},
+                            "notes":         {"type": "string"},
+                        },
+                    }}}},
+                    "responses": {"201": {"description": "Chargeback ouvert"}, "400": {}},
+                }
+            },
+            "/chargebacks/{id}/reverse": {
+                "post": {
+                    "tags": ["Chargebacks"],
+                    "summary": "Annuler un chargeback (MTI 0630)",
+                    "parameters": [{"name": "id", "in": "path", "required": True, "schema": {"type": "string"}}],
+                    "responses": {"200": {}, "400": {}},
+                }
+            },
+            "/chargebacks/{id}/resolve": {
+                "post": {
+                    "tags": ["Chargebacks"],
+                    "summary": "Résoudre un chargeback (ACCEPTED|REJECTED|ARBITRATION)",
+                    "parameters": [{"name": "id", "in": "path", "required": True, "schema": {"type": "string"}}],
+                    "requestBody": {"required": True, "content": {"application/json": {"schema": {
+                        "type": "object", "required": ["resolution"],
+                        "properties": {"resolution": {"type": "string", "enum": ["ACCEPTED", "REJECTED", "ARBITRATION"]}},
+                    }}}},
+                    "responses": {"200": {}, "400": {}},
+                }
+            },
+            "/bin-blacklist/bins": {
+                "post": {
+                    "tags": ["BIN Blacklist"],
+                    "summary": "Ajouter un BIN à la blackliste",
+                    "requestBody": {"required": True, "content": {"application/json": {"schema": {
+                        "type": "object", "required": ["prefix"],
+                        "properties": {
+                            "prefix": {"type": "string", "example": "411111"},
+                            "reason": {"type": "string"},
+                        },
+                    }}}},
+                    "responses": {"201": {}, "400": {}},
+                }
+            },
+            "/currency/rates": {
+                "get": {
+                    "tags": ["Devises"],
+                    "summary": "Taux de change disponibles",
+                    "responses": {"200": {"description": "Taux de change"}},
+                }
+            },
+            "/currency/convert": {
+                "post": {
+                    "tags": ["Devises"],
+                    "summary": "Convertir un montant entre deux devises",
+                    "requestBody": {"required": True, "content": {"application/json": {"schema": {
+                        "type": "object", "required": ["amount", "from_currency", "to_currency"],
+                        "properties": {
+                            "amount":        {"type": "integer", "description": "Montant en centimes"},
+                            "from_currency": {"type": "string", "example": "978"},
+                            "to_currency":   {"type": "string", "example": "840"},
+                        },
+                    }}}},
+                    "responses": {"200": {}, "400": {}},
+                }
+            },
+            "/risk-score": {
+                "post": {
+                    "tags": ["Scoring Risque"],
+                    "summary": "Calculer un score de risque",
+                    "requestBody": {"required": True, "content": {"application/json": {"schema": {
+                        "type": "object", "required": ["pan", "amount"],
+                        "properties": {
+                            "pan":                {"type": "string"},
+                            "amount":             {"type": "integer"},
+                            "mcc":                {"type": "string"},
+                            "is_contactless":     {"type": "boolean"},
+                            "daily_count":        {"type": "integer"},
+                            "hourly_count":       {"type": "integer"},
+                        },
+                    }}}},
+                    "responses": {"200": {}},
+                }
+            },
+            "/cards/{pan}/issuer-scripts": {
+                "get": {
+                    "tags": ["Issuer Scripts"],
+                    "summary": "Générer les scripts émetteur (Tag 71/72)",
+                    "parameters": [
+                        {"name": "pan",        "in": "path",  "required": True, "schema": {"type": "string"}},
+                        {"name": "authorized", "in": "query", "schema": {"type": "boolean", "default": True}},
+                        {"name": "reason",     "in": "query", "schema": {"type": "string"}},
+                    ],
+                    "responses": {"200": {}, "404": {}},
+                }
+            },
+            "/webhooks/log": {
+                "get": {
+                    "tags": ["Webhooks"],
+                    "summary": "Journal des envois webhook",
+                    "responses": {"200": {}},
+                }
+            },
+            "/webhooks/test": {
+                "post": {
+                    "tags": ["Webhooks"],
+                    "summary": "Tester un envoi webhook",
+                    "requestBody": {"content": {"application/json": {"schema": {
+                        "type": "object",
+                        "properties": {
+                            "event":       {"type": "string", "default": "authorization.approved"},
+                            "payload":     {"type": "object"},
+                            "webhook_url": {"type": "string"},
+                        },
+                    }}}},
+                    "responses": {"200": {}},
+                }
+            },
+        },
+    }
+    return jsonify(spec)
+
+
+@app.route("/api/docs", methods=["GET"])
+def swagger_ui():
+    """Interface Swagger UI — Documentation interactive de l'API."""
+    html = """<!DOCTYPE html>
+<html lang="fr">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width,initial-scale=1">
+  <title>EMV Auth Server — API Docs</title>
+  <link rel="stylesheet" href="https://unpkg.com/swagger-ui-dist@5/swagger-ui.css">
+  <style>
+    body { margin: 0; background: #fafafa; }
+    .topbar { background: #1a1a2e !important; }
+    .topbar-wrapper img { display: none; }
+    .topbar-wrapper::before {
+      content: "EMV Authorization Server v1.5.0 — GIE CB";
+      color: #e8d5b7; font-size: 18px; font-weight: bold;
+      padding: 10px 20px; display: block;
+    }
+  </style>
+</head>
+<body>
+  <div id="swagger-ui"></div>
+  <script src="https://unpkg.com/swagger-ui-dist@5/swagger-ui-bundle.js"></script>
+  <script src="https://unpkg.com/swagger-ui-dist@5/swagger-ui-standalone-preset.js"></script>
+  <script>
+    SwaggerUIBundle({
+      url: "/api/v1/openapi.json",
+      dom_id: "#swagger-ui",
+      presets: [SwaggerUIBundle.presets.apis, SwaggerUIStandalonePreset],
+      layout: "StandaloneLayout",
+      deepLinking: true,
+      defaultModelsExpandDepth: 1,
+      defaultModelExpandDepth: 2,
+      displayRequestDuration: true,
+      filter: true,
+    });
+  </script>
+</body>
+</html>"""
+    return html, 200, {"Content-Type": "text/html; charset=utf-8"}
 
 
 @app.errorhandler(404)

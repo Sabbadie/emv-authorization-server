@@ -7,11 +7,14 @@ from datetime import datetime
 
 
 class TransactionStatus:
-    APPROVED = "APPROVED"
-    DECLINED = "DECLINED"
-    PENDING = "PENDING"
-    REVERSED = "REVERSED"
-    ERROR = "ERROR"
+    APPROVED      = "APPROVED"
+    DECLINED      = "DECLINED"
+    PENDING       = "PENDING"
+    REVERSED      = "REVERSED"
+    ERROR         = "ERROR"
+    PREAUTHORIZED = "PREAUTHORIZED"   # E4 — En attente de capture
+    DISPUTED      = "DISPUTED"        # E6 — Dispute ouverte
+    CHARGEBACK    = "CHARGEBACK"      # E6 — Chargeback émis
 
 
 class Transaction:
@@ -232,23 +235,29 @@ class TransactionLog:
         ))
 
     def get_stats(self):
-        total = len(self._transactions)
-        approved = sum(1 for t in self._transactions.values()
-                       if t.status == TransactionStatus.APPROVED)
-        declined = sum(1 for t in self._transactions.values()
-                       if t.status == TransactionStatus.DECLINED)
-        reversed_ = sum(1 for t in self._transactions.values()
-                        if t.status == TransactionStatus.REVERSED)
-        errors = sum(1 for t in self._transactions.values()
-                     if t.status == TransactionStatus.ERROR)
-        total_amount = sum(t.amount for t in self._transactions.values()
-                           if t.status == TransactionStatus.APPROVED)
+        total         = len(self._transactions)
+        approved      = sum(1 for t in self._transactions.values()
+                            if t.status == TransactionStatus.APPROVED)
+        declined      = sum(1 for t in self._transactions.values()
+                            if t.status == TransactionStatus.DECLINED)
+        reversed_     = sum(1 for t in self._transactions.values()
+                            if t.status == TransactionStatus.REVERSED)
+        errors        = sum(1 for t in self._transactions.values()
+                            if t.status == TransactionStatus.ERROR)
+        preauthed     = sum(1 for t in self._transactions.values()
+                            if t.status == TransactionStatus.PREAUTHORIZED)
+        disputed      = sum(1 for t in self._transactions.values()
+                            if t.status == TransactionStatus.DISPUTED)
+        chargebacks   = sum(1 for t in self._transactions.values()
+                            if t.status == TransactionStatus.CHARGEBACK)
+        total_amount  = sum(t.amount for t in self._transactions.values()
+                            if t.status == TransactionStatus.APPROVED)
         reversed_amount = sum(
             getattr(t, "reversal_amount", None) or t.amount
             for t in self._transactions.values()
             if t.status == TransactionStatus.REVERSED
         )
-        by_tier, by_path, by_risk, by_cb_scheme = {}, {}, {}, {}
+        by_tier, by_path, by_risk, by_cb_scheme, by_status = {}, {}, {}, {}, {}
         for t in self._transactions.values():
             if t.amount_tier:
                 by_tier[t.amount_tier] = by_tier.get(t.amount_tier, 0) + 1
@@ -258,22 +267,27 @@ class TransactionLog:
                 by_risk[t.risk_level] = by_risk.get(t.risk_level, 0) + 1
             if t.cb_scheme:
                 by_cb_scheme[t.cb_scheme] = by_cb_scheme.get(t.cb_scheme, 0) + 1
+            by_status[t.status] = by_status.get(t.status, 0) + 1
         return {
-            "total": total,
-            "approved": approved,
-            "declined": declined,
-            "reversed": reversed_,
-            "reversed_amount": reversed_amount,
-            "reversed_amount_formatted": "{:.2f}".format(reversed_amount / 100),
-            "errors": errors,
-            "approval_rate": "{:.1f}%".format(
+            "total":                          total,
+            "approved":                       approved,
+            "declined":                       declined,
+            "reversed":                       reversed_,
+            "reversed_amount":                reversed_amount,
+            "reversed_amount_formatted":      "{:.2f}".format(reversed_amount / 100),
+            "errors":                         errors,
+            "preauthorized":                  preauthed,
+            "disputed":                       disputed,
+            "chargebacks":                    chargebacks,
+            "approval_rate":                  "{:.1f}%".format(
                 (approved / total * 100) if total > 0 else 0),
-            "total_approved_amount": total_amount,
-            "total_approved_amount_formatted": "{:.2f}".format(total_amount / 100),
-            "by_tier": by_tier,
-            "by_auth_path": by_path,
-            "by_risk_level": by_risk,
-            "by_cb_scheme": by_cb_scheme,
+            "total_approved_amount":          total_amount,
+            "total_approved_amount_formatted":"{:.2f}".format(total_amount / 100),
+            "by_tier":                        by_tier,
+            "by_auth_path":                   by_path,
+            "by_risk_level":                  by_risk,
+            "by_cb_scheme":                   by_cb_scheme,
+            "by_status":                      by_status,
         }
 
 

@@ -11,6 +11,7 @@ from emv.crypto import verify_arqc, CryptoError
 from emv.data_elements import CRYPTOGRAM_TYPE
 from emv.amount_rules import get_tier, evaluate_amount
 from emv.giecb import evaluate_cb_rules, identify_card, CB_RESPONSE_CODES
+from emv.bin_blacklist import bin_blacklist
 from models.card import CardStatus, card_db
 from models.transaction import Transaction, TransactionStatus, transaction_log
 from models.tpa_response import TPAResponse
@@ -173,6 +174,25 @@ def authorize(pan, amount, currency, transaction_type,
         "is_contactless": is_contactless,
         "has_emv_data": bool(field_55),
     })
+
+    # ── 0. Vérification blackliste BIN/PAN (E7) ───────────────────────────────
+    is_blocked, block_type, block_reason = bin_blacklist.is_blacklisted(pan)
+    if is_blocked:
+        txn.decline("63", f"BIN/PAN blacklisté ({block_type}) : {block_reason}")
+        txn.log_event("BIN_BLACKLIST_CHECK",
+                      f"PAN refusé — {block_type} blacklisté",
+                      level="ERROR",
+                      data={"block_type": block_type, "reason": block_reason})
+        txn.log_event("AUTHORIZATION_DECISION", "Refusé — blackliste BIN/PAN",
+                      level="ERROR",
+                      data={"response_code": "63", "block_type": block_type})
+        transaction_log.add(txn)
+        return AuthorizationResult(
+            False, "63",
+            message=f"BIN/PAN blacklisté : {block_reason}",
+            transaction=txn)
+    txn.log_event("BIN_BLACKLIST_CHECK", "PAN non blacklisté — OK",
+                  data={"pan_suffix": pan[-4:]})
 
     # ── 1. Évaluation par tranche de montant ─────────────────────────────────
     has_arqc = bool(field_55)
@@ -532,6 +552,22 @@ def authorize(pan, amount, currency, transaction_type,
                 txn.id, pan[-4:], amount, auth_code,
                 amount_decision.tier.name, amount_decision.auth_path,
                 txn.cb_brand, cb_result.sca_exemption)
+
+    # ── 8. Notification webhook (A1) ──────────────────────────────────────────
+    try:
+        from emv.webhooks import notify as _webhook_notify
+        _webhook_notify("authorization.approved", {
+            "transaction_id": txn.id,
+            "rrn": txn.rrn,
+            "pan_masked": "*" * (len(pan) - 4) + pan[-4:],
+            "amount": amount,
+            "currency": currency,
+            "auth_code": auth_code,
+            "tier": amount_decision.tier.name,
+            "cb_scheme": txn.cb_scheme,
+        })
+    except Exception:
+        pass
 
     return AuthorizationResult(
         True, "00", auth_code=auth_code,
