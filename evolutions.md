@@ -1,7 +1,7 @@
 # Évolutions — Serveur d'Autorisation EMV GIE CB
 
-> Dernière mise à jour : **03 mai 2026** — Version courante : **v1.8.0**  
-> Suite de tests : **1 536 tests** (toutes catégories)  
+> Dernière mise à jour : **03 mai 2026** — Version courante : **v1.9.0**  
+> Suite de tests : **1 609 tests** (toutes catégories)  
 > Légende : ✅ Livré · ⚠️ Partiel · ❌ Non démarré  
 > Priorité : 🔴 Haute · 🟡 Moyenne · 🟢 Basse
 
@@ -15,7 +15,7 @@
 | S2 | 🔴 | **Rate limiting** | ✅ Livré | v1.3.0 | `Flask-Limiter 4.1.1`. 300 req/min global, 30/min sur `/authorize`, 5/min batch. HTTP 429. |
 | S3 | 🟡 | **Masquage PAN dans les logs** | ✅ Livré | v1.0.0 | PAN masqué (`************NNNN`) dans toutes les réponses REST et journaux d'audit. |
 | S4 | 🟡 | **Validation stricte des entrées** | ✅ Livré | v1.6.0 | Pydantic v2 intégré (`schemas.py`). 14 schémas (AuthorizeRequest, PreauthRequest, ChargebackRequest…). Validation PAN, amount, currency, MCC, CVV, field_55 hex. HTTP 422 avec détails. 57 tests. |
-| S5 | 🟡 | **Chiffrement données sensibles en RAM** | ❌ Non démarré | — | MDK et PAN stockés en clair en mémoire. HSM simulé non implémenté. |
+| S5 | 🟡 | **Chiffrement données sensibles en RAM** | ✅ Livré | v1.9.0 | `emv/hsm.py` : `SimulatedHSM` + `HsmKeyStore`. KEK Fernet éphémère (AES-128-CBC + HMAC-SHA256) générée au démarrage, jamais persistée sur disque. Chiffre MDK_AC, MDK_ENC, MDK_MAC, CVK1, CVK2, SECRET_KEY au démarrage. Rotation KEK atomique (re-chiffre tout), révocation clé, journal d'accès (200 entrées). Init auto depuis Config. Endpoints : `GET /api/v1/hsm/status`, `GET /api/v1/hsm/keys`, `GET /api/v1/hsm/access-log`, `POST /api/v1/hsm/rotate-kek`, `POST /api/v1/hsm/revoke/<key_id>`. Compliance : FIPS-140-2 (simulation), PCI-DSS. 43 tests. |
 | S6 | 🟢 | **Journal d'audit immuable** | ✅ Livré | v1.4.0 | `Transaction.log_event()` enregistre chaque étape. Endpoint `GET /api/v1/transactions/<id>/log`. |
 
 ---
@@ -27,7 +27,7 @@
 | P1 | 🔴 | **Base de données SQLite / PostgreSQL** | ✅ Livré | v1.6.0 | SQLAlchemy 2.0 + Alembic. ORM complet (`CardORM`, `TransactionORM`, `PreAuthORM`, `ChargebackORM`, `BINBlacklistORM`, `WebhookLogORM`). Repositories DB (`DBCardDatabase`, `DBTransactionLog`). Activation conditionnelle via `DATABASE_URL` (fallback in-memory si absent). `docker-compose.yml` postgres:15. |
 | P2 | 🟡 | **Sauvegarde JSON périodique** | ✅ Livré | v1.3.0 | `persistence.py` : snapshot toutes les 120 s, sauvegarde SIGTERM, rechargement au démarrage. |
 | P3 | 🟡 | **Migrations de schéma** | ✅ Livré | v1.6.0 | Alembic intégré. Migration initiale `001_initial_schema.py`. `alembic upgrade head` automatique au démarrage si DATABASE_URL configurée. |
-| P4 | 🟢 | **Cache Redis** | ❌ Non démarré | — | Utile uniquement en déploiement multi-instances. |
+| P4 | 🟢 | **Cache Redis** | ✅ Livré | v1.9.0 | `cache.py` : `CacheManager` singleton. Backend Redis (redis-py) si `REDIS_URL` configuré, sinon `InMemoryBackend` avec TTL intégré. API identique dans les deux cas. Utilisations : stats globales (TTL 5s), sessions 3DS2 (TTL 10min), lookup token→PAN_hash (TTL 1h). Fallback automatique si Redis indisponible. Endpoints : `GET /api/v1/cache/stats`, `DELETE /api/v1/cache/flush?prefix=`. 30 tests. |
 
 ---
 
@@ -79,7 +79,7 @@
 | A2 | 🟡 | **Mode dégradé simulé** | ✅ Livré | v1.8.0 | `emv/degraded.py` : `DegradedModeManager` singleton thread-safe. 5 types de pannes : TIMEOUT, NETWORK_ERROR, INTERNAL_ERROR, PARTIAL_FAILURE, SLOW_RESPONSE. Taux configurable (0–100%), latence injectée (ms + jitter). Config globale ou par endpoint. Middleware Flask `@before_request` (bypass `/api/v1/chaos`). Endpoints : `GET /api/v1/chaos`, `POST /api/v1/chaos/enable`, `POST /api/v1/chaos/disable`, `POST /api/v1/chaos/reset`, `POST /api/v1/chaos/endpoint`, `DELETE /api/v1/chaos/endpoint/<tag>`, `GET /api/v1/chaos/stats`. 35 tests. |
 | A3 | 🟡 | **Configuration YAML/TOML rechargeable** | ✅ Livré | v1.8.0 | `config_loader.py` : `ConfigManager` singleton. Charge `config.yaml` (PyYAML) ou `config.toml` (tomllib Python 3.11). Fusion profonde avec surcharge par variables d'environnement (`SEC__KEY` → `cfg.sec.key`). Hot-reload par thread de polling (10s). `config.yaml` par défaut inclus (11 sections). Endpoints : `GET /api/v1/config`, `POST /api/v1/config/reload`, `GET /api/v1/config/status`. 25 tests. |
 | A4 | 🟢 | **Client Python CLI** | ✅ Livré | v1.3.0 | `cli.py` : envoi d'autorisations, consultation transactions et stats. |
-| A5 | 🟢 | **Tests unitaires et d'intégration** | ✅ Livré | v1.8.0 | **1 536 tests** dans 30 fichiers. Crypto, TLV, CB rules, tranches, REST, TCP, chargebacks, préauths, BIN blacklist, devises, issuer scripts, risk scoring, webhooks, schemas Pydantic, alertes D5, ORM SQLAlchemy, 3DS2 (44), tokenisation (56), PKI (25), DDA/CDA (34), flux CB complet (45), mode dégradé (35), config loader (25). Couverture > 90 %. |
+| A5 | 🟢 | **Tests unitaires et d'intégration** | ✅ Livré | v1.9.0 | **1 609 tests** dans 32 fichiers. Crypto, TLV, CB rules, tranches, REST, TCP, chargebacks, préauths, BIN blacklist, devises, issuer scripts, risk scoring, webhooks, schemas Pydantic, alertes D5, ORM SQLAlchemy, 3DS2 (44), tokenisation (56), PKI (25), DDA/CDA (34), flux CB complet (45), mode dégradé (35), config loader (25), HSM (43), cache (30). Couverture > 90 %. |
 | A6 | 🟢 | **Conteneurisation Docker** | ✅ Livré | v1.4.0 | `Dockerfile` multi-stage, `docker-compose.yml` avec ports 5000/8583, volume persistance, healthcheck. |
 
 ---
@@ -103,27 +103,31 @@
 
 | Axe | Livré | Partiel | Non démarré | Total |
 |-----|-------|---------|-------------|-------|
-| Sécurité | 5 | 0 | 1 | 6 |
-| Persistance | 3 | 0 | 1 | 4 |
+| Sécurité | 6 | 0 | 0 | 6 |
+| Persistance | 4 | 0 | 0 | 4 |
 | EMV | 8 | 0 | 0 | 8 |
 | GIE CB | 5 | 0 | 0 | 5 |
 | Dashboard | 6 | 0 | 0 | 6 |
 | Architecture | 6 | 0 | 0 | 6 |
 | Hors roadmap | 8 | — | — | 8 |
-| **Total** | **41** | **0** | **2** | **43** |
+| **Total** | **43** | **0** | **0** | **43** |
 
 ---
 
-## Prochaines priorités recommandées (post v1.6.0)
+## Roadmap complète — v1.9.0
 
-| Rang | # | Évolution | Justification |
-|------|---|-----------|---------------|
-| 1 | E2 | 3-D Secure 2.x | Obligatoire DSP2 pour transactions e-commerce |
-| 2 | T003 | Repositories DB PreAuth/Chargeback/BINBlacklist/Webhook | Persistance complète (Card+Transaction déjà migrés) |
-| 3 | S5 | Chiffrement données sensibles en RAM | MDK et PAN actuellement en clair |
-| 4 | A2 | Mode dégradé simulé | Chaos engineering / résilience |
-| 5 | P4 | Cache Redis | Multi-instances et rate-limit distribué |
+**Toutes les 43 features de la roadmap sont livrées.** ✅
+
+| Feature | Version | Statut |
+|---------|---------|--------|
+| S5 — HSM chiffrement RAM | v1.9.0 | ✅ Livré |
+| P4 — Cache Redis + fallback | v1.9.0 | ✅ Livré |
+| C1 — Flux CB complet | v1.8.0 | ✅ Livré |
+| A2 — Mode dégradé / Chaos | v1.8.0 | ✅ Livré |
+| A3 — Config YAML/TOML | v1.8.0 | ✅ Livré |
+| E2 — 3DS2 | v1.7.0 | ✅ Livré |
+| C2/C3/E3 — PKI/HCE/DDA | v1.7.0 | ✅ Livré |
 
 ---
 
-*Roadmap initiée le 02/05/2026 — mise à jour le 03/05/2026 · v1.8.0*
+*Roadmap initiée le 02/05/2026 — mise à jour le 03/05/2026 · v1.9.0 — **43/43 features livrées** ✅*

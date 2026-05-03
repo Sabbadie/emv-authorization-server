@@ -62,6 +62,8 @@ from emv.giecb import (check_mcc_restriction, check_velocity, check_cb_routing,
                         check_pin_status, check_refund_rules,
                         get_cb_service_indicator, CB_BLOCKED_MCCS,
                         CB_VELOCITY_LIMITS, CB_DECLINE_REASONS, CB_PIN_RULES)
+from emv.hsm import get_hsm, SimulatedHSM
+from cache import get_cache, CacheManager
 
 # ── S3 : Masquage PAN dans les logs ─────────────────────────────────────────
 _PAN_RE = re.compile(r'\b([3-6]\d{5})\d{6,10}(\d{4})\b')
@@ -94,6 +96,27 @@ for h in logging.root.handlers:
 app = Flask(__name__)
 app.config["SECRET_KEY"] = Config.SECRET_KEY
 app.config["JSON_SORT_KEYS"] = False
+
+# ── S5 : Initialisation HSM — chiffrement des clés en RAM ────────────────────
+def _init_hsm():
+    try:
+        hsm = get_hsm()
+        count = hsm.initialize_from_config(Config)
+        logger.info("[S5] HSM initialisé — %d clés chiffrées en RAM (KEK éphémère)", count)
+    except Exception as exc:
+        logger.error("[S5] Échec initialisation HSM : %s", exc)
+
+_init_hsm()
+
+# ── P4 : Initialisation Cache ─────────────────────────────────────────────────
+def _init_cache():
+    try:
+        cm = get_cache()
+        logger.info("[P4] Cache initialisé — backend: %s", cm.backend_type)
+    except Exception as exc:
+        logger.error("[P4] Échec initialisation Cache : %s", exc)
+
+_init_cache()
 
 # ── S2 : Rate Limiting ────────────────────────────────────────────────────────
 limiter = Limiter(
@@ -3191,6 +3214,82 @@ def config_reload():
 def config_status():
     """A3 — Retourne le statut du gestionnaire de configuration."""
     return jsonify(get_config_manager().get_status()), 200
+
+
+# ═══════════════════════════════════════════════════════════════════════════
+# S5 — HSM simulé : Protection des clés cryptographiques en RAM
+# ═══════════════════════════════════════════════════════════════════════════
+
+@app.route("/api/v1/hsm/status", methods=["GET"])
+def hsm_status():
+    """S5 — Retourne le statut du HSM et les métriques de protection des clés."""
+    return jsonify(get_hsm().get_status()), 200
+
+
+@app.route("/api/v1/hsm/keys", methods=["GET"])
+def hsm_key_inventory():
+    """S5 — Inventaire des clés chargées (métadonnées uniquement, sans valeurs)."""
+    return jsonify({
+        "keys": get_hsm().get_key_inventory(),
+        "count": len(get_hsm().get_key_inventory()),
+    }), 200
+
+
+@app.route("/api/v1/hsm/access-log", methods=["GET"])
+def hsm_access_log():
+    """S5 — Journal des accès aux clés HSM."""
+    log = get_hsm().get_access_log()
+    limit = min(int(request.args.get("limit", 50)), 200)
+    return jsonify({
+        "log": log[-limit:],
+        "total": len(log),
+        "limit": limit,
+    }), 200
+
+
+@app.route("/api/v1/hsm/rotate-kek", methods=["POST"])
+def hsm_rotate_kek():
+    """S5 — Rotation de la KEK : re-chiffre toutes les clés avec une nouvelle KEK éphémère."""
+    try:
+        get_hsm().rotate_kek()
+        return jsonify({
+            "message": "KEK pivotée avec succès — toutes les clés re-chiffrées",
+            "kek_persisted": False,
+        }), 200
+    except Exception as exc:
+        return jsonify({"error": str(exc)}), 500
+
+
+@app.route("/api/v1/hsm/revoke/<string:key_id>", methods=["POST"])
+def hsm_revoke_key(key_id):
+    """S5 — Révoque une clé HSM (désactive sans supprimer)."""
+    if get_hsm().revoke_key(key_id):
+        return jsonify({"message": "Clé '{}' révoquée".format(key_id), "key_id": key_id}), 200
+    return jsonify({"error": "Clé '{}' introuvable".format(key_id)}), 404
+
+
+# ═══════════════════════════════════════════════════════════════════════════
+# P4 — Cache distribué : Redis + fallback in-memory
+# ═══════════════════════════════════════════════════════════════════════════
+
+@app.route("/api/v1/cache/stats", methods=["GET"])
+def cache_stats():
+    """P4 — Statistiques du cache (backend, hits, misses, clés actives)."""
+    info = get_cache().get_info()
+    info["keys_list"] = get_cache().keys()[:100]
+    return jsonify(info), 200
+
+
+@app.route("/api/v1/cache/flush", methods=["DELETE"])
+def cache_flush():
+    """P4 — Vide tout ou partie du cache (paramètre optionnel: prefix)."""
+    prefix = request.args.get("prefix", "")
+    count = get_cache().flush(prefix=prefix)
+    return jsonify({
+        "flushed": count,
+        "prefix": prefix or "(all)",
+        "message": "{} entrée(s) supprimée(s)".format(count),
+    }), 200
 
 
 # ═══════════════════════════════════════════════════════════════════════════

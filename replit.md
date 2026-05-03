@@ -1,4 +1,4 @@
-# EMV Authorization Server — v1.8.0
+# EMV Authorization Server — v1.9.0
 
 Serveur d'autorisation EMV complet conforme aux normes EMV 4.3 et ISO 8583,
 développé en Python/Flask. Deux interfaces : REST HTTP (port 5000) et TCP ISO 8583
@@ -42,9 +42,11 @@ emv-auth-server/
 │   ├── dda_cda.py          # DDA/CDA authentification offline RSA (E3)
 │   ├── tokenization.py     # Token HCE/NFC CB-PAY — Token Vault (C3)
 │   ├── degraded.py         # Mode dégradé / Chaos Engineering (A2)
+│   ├── hsm.py              # HSM simulé — chiffrement clés en RAM (S5)
 │   └── tcp_server.py       # Serveur TCP ISO 8583 (port 8583)
 ├── config_loader.py        # Config YAML/TOML rechargeable à chaud (A3)
 ├── config.yaml             # Fichier de configuration par défaut (A3)
+├── cache.py                # Cache Redis + fallback in-memory (P4)
 ├── iso8583/
 │   └── message.py          # Messages ISO 8583
 ├── models/
@@ -55,8 +57,12 @@ emv-auth-server/
 │   ├── orm_models.py       # 6 modèles ORM (Card, Transaction, PreAuth, Chargeback, BINBlacklist, WebhookLog)
 │   └── tpa_response.py     # Décomposition réponse TPA
 ├── tools/
-│   └── terminal_simulator.py  # Client TCP simulateur terminal
-└── tests/                  # 30 fichiers, 1536 tests
+│   ├── terminal_simulator.py  # Client TCP simulateur terminal
+│   └── load_test_data.py      # Script de chargement du jeu d'essai via API
+├── GUIDE_UTILISATEUR.md    # Guide utilisateur complet avec exemples curl
+├── test_data/
+│   └── jeu_essai.json      # 7 cartes, 20 scénarios, 7 utilisateurs test
+└── tests/                  # 32 fichiers, 1609 tests
     ├── test_api.py               # Tests API REST
     ├── test_authorization.py     # Tests logique d'autorisation
     ├── test_schemas.py           # Tests Pydantic S4 (57 tests)
@@ -182,19 +188,36 @@ Protocole : préfixe 4 octets big-endian + corps JSON UTF-8.
 | `API_KEY` | _(vide)_ | Clé API (header `X-API-Key`) |
 | `FLASK_ENV` | `production` | Environnement Flask |
 
-## Nouvelles fonctionnalités v1.8.0
+## Nouvelles fonctionnalités v1.9.0 (roadmap complète — 43/43)
 
 | Feature | Module | Endpoints REST |
 |---------|--------|---------------|
-| **C1 — Flux CB complet** | `emv/giecb.py` | `POST /api/v1/cb/routing` · `POST /api/v1/cb/velocity` · `POST /api/v1/cb/mcc-check` · `POST /api/v1/cb/pin-status` · `GET /api/v1/cb/service-indicators` |
-| **A2 — Chaos / Mode dégradé** | `emv/degraded.py` | `GET /api/v1/chaos` · `POST /api/v1/chaos/enable` · `POST /api/v1/chaos/disable` · `POST /api/v1/chaos/reset` · `POST /api/v1/chaos/endpoint` · `DELETE /api/v1/chaos/endpoint/<tag>` · `GET /api/v1/chaos/stats` |
-| **A3 — Config YAML/TOML** | `config_loader.py` + `config.yaml` | `GET /api/v1/config` · `POST /api/v1/config/reload` · `GET /api/v1/config/status` |
+| **S5 — HSM / Chiffrement RAM** | `emv/hsm.py` | `GET /api/v1/hsm/status` · `GET /api/v1/hsm/keys` · `GET /api/v1/hsm/access-log` · `POST /api/v1/hsm/rotate-kek` · `POST /api/v1/hsm/revoke/<key_id>` |
+| **P4 — Cache Redis + fallback** | `cache.py` | `GET /api/v1/cache/stats` · `DELETE /api/v1/cache/flush` |
+| **C1 — Flux CB complet** | `emv/giecb.py` | `POST /api/v1/cb/routing` · `/cb/velocity` · `/cb/mcc-check` · `/cb/pin-status` · `GET /api/v1/cb/service-indicators` |
+| **A2 — Chaos Engineering** | `emv/degraded.py` | `POST /api/v1/chaos/enable` · `/chaos/disable` · `/chaos/reset` · `/chaos/endpoint` |
+| **A3 — Config YAML/TOML** | `config_loader.py` | `GET /api/v1/config` · `POST /api/v1/config/reload` · `GET /api/v1/config/status` |
+
+## Jeu d'essai utilisateurs
+
+```bash
+# Lister les scénarios
+python tools/load_test_data.py --list
+
+# Exécuter tous les scénarios (serveur doit être lancé)
+python tools/load_test_data.py --url http://localhost:5000
+
+# Un scénario spécifique
+python tools/load_test_data.py --scenario SC01
+```
 
 ## Lancer les tests
 
 ```bash
-python -m pytest tests/ -q                   # 1536 tests, ~22 s
-python -m pytest tests/test_cb_flux.py        # Flux CB complet C1 (45 tests)
-python -m pytest tests/test_degraded.py       # Chaos mode A2 (35 tests)
-python -m pytest tests/test_config_loader.py  # Config YAML/TOML A3 (25 tests)
+python -m pytest tests/ -q                    # 1609 tests, ~23 s
+python -m pytest tests/test_hsm.py            # HSM S5 (43 tests)
+python -m pytest tests/test_cache.py          # Cache P4 (30 tests)
+python -m pytest tests/test_cb_flux.py        # Flux CB C1 (45 tests)
+python -m pytest tests/test_degraded.py       # Chaos A2 (35 tests)
+python -m pytest tests/test_config_loader.py  # Config A3 (25 tests)
 ```

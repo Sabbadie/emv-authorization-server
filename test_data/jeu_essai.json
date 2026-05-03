@@ -1,0 +1,458 @@
+{
+  "_meta": {
+    "version": "1.0",
+    "description": "Jeu d'essai EMV Authorization Server v1.9.0",
+    "created": "2026-05-03",
+    "server_url": "http://localhost:5000"
+  },
+
+  "cartes_test": [
+    {
+      "id": "CB_VISA_ACTIVE",
+      "label": "Carte Visa CB active — solde normal",
+      "pan": "4111111111111111",
+      "titulaire": "JEAN DUPONT",
+      "expiration": "2812",
+      "cvv2": "123",
+      "statut": "ACTIVE",
+      "solde_cents": 500000,
+      "reseau": "VISA CB",
+      "type": "DEBIT",
+      "cas_test": ["autorisation_simple", "sans_contact", "e-commerce", "3ds2"]
+    },
+    {
+      "id": "CB_MC_ACTIVE",
+      "label": "Carte Mastercard CB active — solde élevé",
+      "pan": "5500000000000004",
+      "titulaire": "MARIE MARTIN",
+      "expiration": "2812",
+      "cvv2": "456",
+      "statut": "ACTIVE",
+      "solde_cents": 1000000,
+      "reseau": "MC CB",
+      "type": "CREDIT",
+      "cas_test": ["autorisation_simple", "haut_montant", "preautorisation"]
+    },
+    {
+      "id": "CB_VISA_SMALL",
+      "label": "Carte Visa CB — solde faible (1 centime)",
+      "pan": "4000000000000036",
+      "titulaire": "PAUL PETIT",
+      "expiration": "2812",
+      "cvv2": "789",
+      "statut": "ACTIVE",
+      "solde_cents": 100,
+      "reseau": "VISA CB",
+      "type": "DEBIT",
+      "cas_test": ["refus_provision", "montant_limit"]
+    },
+    {
+      "id": "CB_VISA_EXPIRED",
+      "label": "Carte Visa CB expirée",
+      "pan": "4000000000000010",
+      "titulaire": "SOPHIE EXPIRY",
+      "expiration": "2001",
+      "cvv2": "000",
+      "statut": "ACTIVE",
+      "solde_cents": 500000,
+      "reseau": "VISA CB",
+      "type": "DEBIT",
+      "cas_test": ["refus_expiration"]
+    },
+    {
+      "id": "CB_VISA_BLOCKED",
+      "label": "Carte Visa CB bloquée",
+      "pan": "4000000000000028",
+      "titulaire": "LUC BLOCKED",
+      "expiration": "2812",
+      "cvv2": "111",
+      "statut": "BLOCKED",
+      "solde_cents": 300000,
+      "reseau": "VISA CB",
+      "type": "DEBIT",
+      "cas_test": ["refus_blocage"]
+    },
+    {
+      "id": "CB_NATIVE_ACTIVE",
+      "label": "Carte CB native (AID A0000000421010)",
+      "pan": "4970100000000154",
+      "titulaire": "CLAIRE CB",
+      "expiration": "2812",
+      "cvv2": "222",
+      "statut": "ACTIVE",
+      "solde_cents": 300000,
+      "reseau": "CB",
+      "aid": "A0000000421010",
+      "type": "DEBIT",
+      "cas_test": ["routage_domestique", "sans_contact_nfc", "dda_cda"]
+    },
+    {
+      "id": "CB_VISA_ACTIVE_2",
+      "label": "Carte Visa CB — tests avancés",
+      "pan": "4000000000000002",
+      "titulaire": "ALICE ADVANCED",
+      "expiration": "2812",
+      "cvv2": "333",
+      "statut": "ACTIVE",
+      "solde_cents": 250000,
+      "reseau": "VISA CB",
+      "type": "DEBIT",
+      "cas_test": ["chargeback", "reversal", "velocity", "tokenisation"]
+    }
+  ],
+
+  "scenarios": [
+    {
+      "id": "SC01",
+      "nom": "Autorisation simple — achat en ligne",
+      "description": "Transaction e-commerce standard < 50€",
+      "methode": "POST",
+      "endpoint": "/api/v1/authorize",
+      "corps": {
+        "pan": "4111111111111111",
+        "amount": 4500,
+        "currency": "978",
+        "transaction_type": "00",
+        "terminal_id": "TERM0001",
+        "merchant_id": "MERCH001",
+        "pos_entry_mode": "010",
+        "mcc": "5812"
+      },
+      "reponse_attendue": {"approved": true, "response_code": "00"}
+    },
+    {
+      "id": "SC02",
+      "nom": "Refus — provision insuffisante",
+      "description": "Montant > solde de la carte",
+      "methode": "POST",
+      "endpoint": "/api/v1/authorize",
+      "corps": {
+        "pan": "4000000000000036",
+        "amount": 5000,
+        "currency": "978",
+        "transaction_type": "00",
+        "terminal_id": "TERM0001",
+        "merchant_id": "MERCH001",
+        "pos_entry_mode": "010"
+      },
+      "reponse_attendue": {"approved": false, "response_code": "51"}
+    },
+    {
+      "id": "SC03",
+      "nom": "Refus — carte expirée",
+      "description": "Carte avec date d'expiration dépassée",
+      "methode": "POST",
+      "endpoint": "/api/v1/authorize",
+      "corps": {
+        "pan": "4000000000000010",
+        "amount": 1000,
+        "currency": "978",
+        "transaction_type": "00",
+        "terminal_id": "TERM0001",
+        "merchant_id": "MERCH001",
+        "pos_entry_mode": "010",
+        "expiry_date": "2001"
+      },
+      "reponse_attendue": {"approved": false, "response_code": "54"}
+    },
+    {
+      "id": "SC04",
+      "nom": "Refus — carte bloquée",
+      "description": "Carte avec statut BLOCKED",
+      "methode": "POST",
+      "endpoint": "/api/v1/authorize",
+      "corps": {
+        "pan": "4000000000000028",
+        "amount": 1000,
+        "currency": "978",
+        "transaction_type": "00",
+        "terminal_id": "TERM0001",
+        "merchant_id": "MERCH001",
+        "pos_entry_mode": "010"
+      },
+      "reponse_attendue": {"approved": false, "response_code": "62"}
+    },
+    {
+      "id": "SC05",
+      "nom": "Transaction sans contact NFC",
+      "description": "Paiement NFC < 50€ (POS mode 07)",
+      "methode": "POST",
+      "endpoint": "/api/v1/authorize",
+      "corps": {
+        "pan": "4970100000000154",
+        "amount": 2500,
+        "currency": "978",
+        "transaction_type": "00",
+        "terminal_id": "TERM_NFC",
+        "merchant_id": "MERCH_NFC",
+        "pos_entry_mode": "071",
+        "mcc": "5411"
+      },
+      "reponse_attendue": {"approved": true, "response_code": "00"}
+    },
+    {
+      "id": "SC06",
+      "nom": "Refus NFC — montant > 50€",
+      "description": "Contactless dépassant le plafond CB (5000 cts = 50€)",
+      "methode": "POST",
+      "endpoint": "/api/v1/authorize",
+      "corps": {
+        "pan": "4111111111111111",
+        "amount": 6000,
+        "currency": "978",
+        "transaction_type": "00",
+        "terminal_id": "TERM_NFC",
+        "merchant_id": "MERCH_NFC",
+        "pos_entry_mode": "071",
+        "mcc": "5812"
+      },
+      "reponse_attendue": {"approved": false, "response_code": "62"}
+    },
+    {
+      "id": "SC07",
+      "nom": "Préautorisation hôtel",
+      "description": "Pré-auth 200€ pour une réservation hôtelière",
+      "methode": "POST",
+      "endpoint": "/api/v1/preauthorizations",
+      "corps": {
+        "pan": "5500000000000004",
+        "amount": 20000,
+        "currency": "978",
+        "terminal_id": "HOTEL001",
+        "merchant_id": "HOTEL_PARIS",
+        "mcc": "7011"
+      },
+      "reponse_attendue": {"status": "PENDING"}
+    },
+    {
+      "id": "SC08",
+      "nom": "3DS2 — authentification frictionless",
+      "description": "Transaction e-commerce < 30€ → exemption LVP",
+      "methode": "POST",
+      "endpoint": "/api/v1/3ds/authenticate",
+      "corps": {
+        "pan": "4111111111111111",
+        "amount": 2000,
+        "currency": "978",
+        "merchant_id": "SHOP_ONLINE",
+        "notification_url": "https://shop.example.com/callback"
+      },
+      "reponse_attendue": {"status": "FRICTIONLESS", "eci": "05"}
+    },
+    {
+      "id": "SC09",
+      "nom": "3DS2 — challenge OTP requis",
+      "description": "Transaction e-commerce 200€ → challenge OTP",
+      "methode": "POST",
+      "endpoint": "/api/v1/3ds/authenticate",
+      "corps": {
+        "pan": "4111111111111111",
+        "amount": 20000,
+        "currency": "978",
+        "merchant_id": "SHOP_ONLINE",
+        "notification_url": "https://shop.example.com/callback"
+      },
+      "reponse_attendue": {"status": "CHALLENGE_REQUIRED"}
+    },
+    {
+      "id": "SC10",
+      "nom": "Tokenisation HCE — création token",
+      "description": "Création d'un token NFC pour CB-PAY mobile",
+      "methode": "POST",
+      "endpoint": "/api/v1/tokens",
+      "corps": {
+        "pan": "4111111111111111",
+        "domain": "HCE_MOBILE",
+        "requestor_id": "CBPAY_APP_V2",
+        "max_uses": 10
+      },
+      "reponse_attendue": {"status": "ACTIVE"}
+    },
+    {
+      "id": "SC11",
+      "nom": "Autorisation avec token HCE",
+      "description": "Paiement NFC en utilisant un token au lieu du PAN réel",
+      "methode": "POST",
+      "endpoint": "/api/v1/authorize",
+      "note": "Utiliser le token retourné par SC10 comme PAN",
+      "corps": {
+        "pan": "{{TOKEN_SC10}}",
+        "amount": 1500,
+        "currency": "978",
+        "transaction_type": "00",
+        "terminal_id": "TERM_NFC",
+        "merchant_id": "MERCH_NFC",
+        "pos_entry_mode": "071"
+      },
+      "reponse_attendue": {"approved": true, "response_code": "00", "token_used": true}
+    },
+    {
+      "id": "SC12",
+      "nom": "Routage CB domestique",
+      "description": "Vérifier la priorité CB sur VISA pour une carte française",
+      "methode": "POST",
+      "endpoint": "/api/v1/cb/routing",
+      "corps": {
+        "pan": "4111111111111111",
+        "country_code": "250"
+      },
+      "reponse_attendue": {"preferred_network": "CB", "is_domestic": true}
+    },
+    {
+      "id": "SC13",
+      "nom": "Redressement transaction",
+      "description": "Annuler une transaction approuvée",
+      "methode": "POST",
+      "endpoint": "/api/v1/transactions/{id}/reverse",
+      "note": "Remplacer {id} par l'ID retourné lors de SC01",
+      "corps": {
+        "amount": 4500
+      },
+      "reponse_attendue": {"success": true}
+    },
+    {
+      "id": "SC14",
+      "nom": "Chargeback — impayé",
+      "description": "Contestation de transaction par CB01 (impayé)",
+      "methode": "POST",
+      "endpoint": "/api/v1/transactions/{id}/chargeback",
+      "note": "Remplacer {id} par un ID de transaction approuvée",
+      "corps": {
+        "reason_code": "CB01",
+        "amount": 4500,
+        "description": "Transaction non reconnue par le porteur"
+      },
+      "reponse_attendue": {"status": "PENDING"}
+    },
+    {
+      "id": "SC15",
+      "nom": "Mode dégradé — activation chaos",
+      "description": "Activer le mode dégradé à 30% de taux de panne",
+      "methode": "POST",
+      "endpoint": "/api/v1/chaos/enable",
+      "corps": {
+        "failure_rate": 0.3,
+        "failure_types": ["TIMEOUT", "NETWORK_ERROR"],
+        "latency_ms": 200
+      },
+      "reponse_attendue": {"enabled": true}
+    },
+    {
+      "id": "SC16",
+      "nom": "PKI CB — certificats ICC",
+      "description": "Obtenir la chaîne de certificats PKI pour une carte",
+      "methode": "GET",
+      "endpoint": "/api/v1/pki/4111111111111111",
+      "corps": null,
+      "reponse_attendue": {"ca": {}, "issuer": {}, "icc": {}}
+    },
+    {
+      "id": "SC17",
+      "nom": "DDA — signature dynamique",
+      "description": "Signer des données avec la clé ICC privée",
+      "methode": "POST",
+      "endpoint": "/api/v1/dda/sign",
+      "corps": {
+        "pan": "4111111111111111",
+        "data_to_sign_hex": "0102030405060708090A0B0C0D0E0F10"
+      },
+      "reponse_attendue": {"sdad_hex": "..."}
+    },
+    {
+      "id": "SC18",
+      "nom": "Rechargement configuration",
+      "description": "Recharger config.yaml à chaud sans redémarrer",
+      "methode": "POST",
+      "endpoint": "/api/v1/config/reload",
+      "corps": {},
+      "reponse_attendue": {"reloaded": true}
+    },
+    {
+      "id": "SC19",
+      "nom": "Vérification vélocité",
+      "description": "Vérifier que 12 transactions en 30min déclenche le refus",
+      "methode": "POST",
+      "endpoint": "/api/v1/cb/velocity",
+      "corps": {
+        "amount": 1000,
+        "transaction_type": "00",
+        "recent_transactions": []
+      },
+      "reponse_attendue": {"allowed": true}
+    },
+    {
+      "id": "SC20",
+      "nom": "HSM — statut du module",
+      "description": "Vérifier que les clés sont chargées et protégées",
+      "methode": "GET",
+      "endpoint": "/api/v1/hsm/status",
+      "corps": null,
+      "reponse_attendue": {"initialized": true, "kek_persisted": false}
+    }
+  ],
+
+  "utilisateurs_test": [
+    {
+      "id": "USR001",
+      "nom": "Jean Dupont",
+      "profil": "Particulier — usage courant",
+      "carte_principale": "CB_VISA_ACTIVE",
+      "scenarios_associes": ["SC01", "SC05", "SC08", "SC09", "SC10", "SC11"]
+    },
+    {
+      "id": "USR002",
+      "nom": "Marie Martin",
+      "profil": "Particulier — achats importants",
+      "carte_principale": "CB_MC_ACTIVE",
+      "scenarios_associes": ["SC07", "SC14"]
+    },
+    {
+      "id": "USR003",
+      "nom": "Paul Petit",
+      "profil": "Compte à découvert — tests de refus",
+      "carte_principale": "CB_VISA_SMALL",
+      "scenarios_associes": ["SC02"]
+    },
+    {
+      "id": "USR004",
+      "nom": "Sophie Expiry",
+      "profil": "Carte expirée — test refus",
+      "carte_principale": "CB_VISA_EXPIRED",
+      "scenarios_associes": ["SC03"]
+    },
+    {
+      "id": "USR005",
+      "nom": "Luc Blocked",
+      "profil": "Carte bloquée — test refus",
+      "carte_principale": "CB_VISA_BLOCKED",
+      "scenarios_associes": ["SC04"]
+    },
+    {
+      "id": "USR006",
+      "nom": "Claire CB",
+      "profil": "Utilisateur CB natif — paiement NFC",
+      "carte_principale": "CB_NATIVE_ACTIVE",
+      "scenarios_associes": ["SC05", "SC12", "SC16", "SC17"]
+    },
+    {
+      "id": "USR007",
+      "nom": "Alice Advanced",
+      "profil": "Tests avancés — tous scénarios",
+      "carte_principale": "CB_VISA_ACTIVE_2",
+      "scenarios_associes": ["SC13", "SC14", "SC15", "SC18", "SC19", "SC20"]
+    }
+  ],
+
+  "commandes_curl": {
+    "autorisation_simple": "curl -s -X POST http://localhost:5000/api/v1/authorize -H 'Content-Type: application/json' -d '{\"pan\":\"4111111111111111\",\"amount\":4500,\"currency\":\"978\",\"transaction_type\":\"00\",\"terminal_id\":\"TERM0001\",\"merchant_id\":\"MERCH001\",\"pos_entry_mode\":\"010\"}'",
+    "stats": "curl -s http://localhost:5000/api/v1/stats | python -m json.tool",
+    "liste_transactions": "curl -s http://localhost:5000/api/v1/transactions | python -m json.tool",
+    "token_create": "curl -s -X POST http://localhost:5000/api/v1/tokens -H 'Content-Type: application/json' -d '{\"pan\":\"4111111111111111\",\"domain\":\"HCE_MOBILE\"}'",
+    "3ds_auth": "curl -s -X POST http://localhost:5000/api/v1/3ds/authenticate -H 'Content-Type: application/json' -d '{\"pan\":\"4111111111111111\",\"amount\":20000,\"currency\":\"978\",\"merchant_id\":\"SHOP001\"}'",
+    "chaos_enable": "curl -s -X POST http://localhost:5000/api/v1/chaos/enable -H 'Content-Type: application/json' -d '{\"failure_rate\":0.5,\"failure_types\":[\"TIMEOUT\"]}'",
+    "chaos_disable": "curl -s -X POST http://localhost:5000/api/v1/chaos/disable",
+    "config_reload": "curl -s -X POST http://localhost:5000/api/v1/config/reload",
+    "hsm_status": "curl -s http://localhost:5000/api/v1/hsm/status | python -m json.tool",
+    "cache_stats": "curl -s http://localhost:5000/api/v1/cache/stats | python -m json.tool"
+  }
+}
