@@ -47,4 +47,30 @@ if __name__ == "__main__":
     else:
         logger.info("API Key non configurée — mode dev sans auth (définir EMV_API_KEY)")
 
+    # Serveur TCP ISO 8583 (interface terminaux de paiement)
+    tcp_server = None
+    if Config.TCP_ENABLED:
+        try:
+            from emv.tcp_server import TCPAuthorizationServer
+            tcp_server = TCPAuthorizationServer(
+                host=Config.TCP_HOST, port=Config.TCP_PORT)
+            tcp_server.start()
+            logger.info(
+                "Interface TCP ISO 8583 démarrée sur %s:%d",
+                Config.TCP_HOST, Config.TCP_PORT,
+            )
+            logger.info(
+                "  → Protocole : [4 octets longueur][JSON UTF-8]"
+            )
+            logger.info(
+                "  → Exemple   : tools/terminal_simulator.py"
+            )
+        except Exception as exc:
+            logger.warning("Impossible de démarrer l'interface TCP : %s", exc)
+    else:
+        logger.info("Interface TCP désactivée (TCP_ENABLED=false)")
+
     app.run(host=Config.HOST, port=Config.PORT, debug=Config.DEBUG)
+
+    if tcp_server:
+        tcp_server.stop()

@@ -34,6 +34,8 @@ def _reset_active_card():
         card.balance = 500000
         card.daily_spent = 0
         card.daily_limit = 200000
+        card.contactless_cumul = 0
+        card.consecutive_offline = 0
         card.last_reset_date = __import__('datetime').datetime.utcnow().date().isoformat()
 
 

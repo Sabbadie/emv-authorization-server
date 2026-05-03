@@ -6,6 +6,11 @@ class Config:
     PORT = int(os.getenv("PORT", 5000))
     DEBUG = os.getenv("DEBUG", "false").lower() == "true"
 
+    # Interface TCP ISO 8583 (simulateurs de terminaux)
+    TCP_ENABLED = os.getenv("TCP_ENABLED", "true").lower() == "true"
+    TCP_HOST    = os.getenv("TCP_HOST", "0.0.0.0")
+    TCP_PORT    = int(os.getenv("TCP_PORT", 8583))
+
     SECRET_KEY = os.getenv("SECRET_KEY", "emv-auth-server-secret-2024")
 
     # S1 — Authentification API Key
