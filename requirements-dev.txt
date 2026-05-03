@@ -1,0 +1,4 @@
+# Dépendances de développement / tests (étend requirements.txt)
+-r requirements.txt
+pytest==9.0.3
+pytest-flask==1.3.0
