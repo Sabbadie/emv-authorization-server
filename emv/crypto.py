@@ -38,15 +38,14 @@ def derive_session_key(master_key, atc, key_type="AC"):
     atc_bytes = struct.pack(">H", atc)
 
     if key_type == "AC":
-        derivation_data_left = atc_bytes + b'\xF0' + b'\x00' * 6
-        derivation_data_right = atc_bytes + b'\x0F' + b'\x00' * 6
+        derivation_data_left = atc_bytes + b'\xF0' + b'\x00' * 5
+        derivation_data_right = atc_bytes + b'\x0F' + b'\x00' * 5
     elif key_type == "ENC":
-        derivation_data_left = atc_bytes + b'\x01' + b'\x82' + b'\x00' * 5
-        derivation_data_right = atc_bytes + b'\x01' + b'\x82' + b'\x00' * 5
-        derivation_data_right = atc_bytes + b'\x02' + b'\x82' + b'\x00' * 5
+        derivation_data_left = atc_bytes + b'\x01' + b'\x82' + b'\x00' * 4
+        derivation_data_right = atc_bytes + b'\x02' + b'\x82' + b'\x00' * 4
     elif key_type == "MAC":
-        derivation_data_left = atc_bytes + b'\x01' + b'\x01' + b'\x00' * 5
-        derivation_data_right = atc_bytes + b'\x02' + b'\x01' + b'\x00' * 5
+        derivation_data_left = atc_bytes + b'\x01' + b'\x01' + b'\x00' * 4
+        derivation_data_right = atc_bytes + b'\x02' + b'\x01' + b'\x00' * 4
     else:
         raise CryptoError("Unknown key type: {}".format(key_type))
 
@@ -213,7 +212,7 @@ def encrypt_pin_block(pin_block, pan, key):
         pin_block = bytes.fromhex(pin_block)
 
     pan_str = str(pan).replace(" ", "")
-    pan_block = b'\x00\x00' + bytes.fromhex("0" + pan_str[-13:-1])
+    pan_block = b'\x00\x00' + bytes.fromhex(pan_str[-13:-1])
 
     decrypted = bytes(a ^ b for a, b in zip(pin_block, pan_block))
     return decrypted

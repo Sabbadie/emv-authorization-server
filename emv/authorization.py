@@ -70,6 +70,8 @@ def generate_auth_code():
 
 
 def _parse_emv_field55(field_55_hex):
+    if not field_55_hex or not str(field_55_hex).strip():
+        return None
     try:
         tlv_list = parse(field_55_hex)
         fields = extract_emv_fields(field_55_hex)

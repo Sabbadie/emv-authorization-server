@@ -182,7 +182,7 @@ class TPAResponse:
         cb_scheme = getattr(t, "cb_scheme", None)
         cb_si = getattr(t, "cb_service_indicator", "01")
         cb_sca = getattr(t, "cb_sca_exemption", "NONE")
-        cb_floor = getattr(t, "cb_floor_limit", 0)
+        cb_floor = getattr(t, "cb_floor_limit", 0) or 0
         cb_is_cl = getattr(t, "cb_is_contactless", False)
         cb_rc = getattr(t, "cb_response_code", "00")
         cb_dr = getattr(t, "cb_decline_reason", None)
