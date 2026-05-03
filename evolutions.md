@@ -99,6 +99,18 @@
 
 ---
 
+## Roadmap versionnée
+
+| Version | Objectif | Statut | Priorité |
+|---------|----------|--------|----------|
+| v1.10.0 | Historique JSON 7 jours + import JSON → DB | ✅ Livré | Haute |
+| v1.11.0 | Export TXT/JSON des autorisations passées + endpoints de consultation enrichis | 🟡 À faire | Haute |
+| v1.12.0 | API de récupération assistée des snapshots + archivage avancé | 🟡 À faire | Moyenne |
+| v1.13.0 | Webhooks événementiels et audit exportable | 🟢 À planifier | Moyenne |
+| v1.14.0 | HA / multi-instance + persistance renforcée | 🟢 À planifier | Basse |
+
+---
+
 ## Tableau de bord global
 
 | Axe | Livré | Partiel | Non démarré | Total |
@@ -114,7 +126,7 @@
 
 ---
 
-## Roadmap complète — v1.9.0
+## Roadmap complète — v1.10.0
 
 **Toutes les 43 features de la roadmap sont livrées.** ✅
 
@@ -130,4 +142,4 @@
 
 ---
 
-*Roadmap initiée le 02/05/2026 — mise à jour le 03/05/2026 · v1.9.0 — **43/43 features livrées** ✅*
+*Roadmap initiée le 02/05/2026 — mise à jour le 03/05/2026 · v1.10.0 — **43/43 features livrées** ✅*
