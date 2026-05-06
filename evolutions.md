@@ -1,7 +1,7 @@
 # Évolutions — Serveur d'Autorisation EMV GIE CB
 
-> Dernière mise à jour : **03 mai 2026** — Version courante : **v1.10.0**  
-> Suite de tests : **1 644 tests** (toutes catégories)  
+> Dernière mise à jour : **06 mai 2026** — Version courante : **v1.14.0**  
+> Suite de tests : **1 720 tests** (toutes catégories)  
 > Légende : ✅ Livré · ⚠️ Partiel · ❌ Non démarré  
 > Priorité : 🔴 Haute · 🟡 Moyenne · 🟢 Basse
 
@@ -25,9 +25,10 @@
 | # | Priorité | Évolution | Statut | Version | Notes |
 |---|----------|-----------|--------|---------|-------|
 | P1 | 🔴 | **Base de données SQLite / PostgreSQL** | ✅ Livré | v1.6.0 | SQLAlchemy 2.0 + Alembic. ORM complet (`CardORM`, `TransactionORM`, `PreAuthORM`, `ChargebackORM`, `BINBlacklistORM`, `WebhookLogORM`). Repositories DB (`DBCardDatabase`, `DBTransactionLog`). Activation conditionnelle via `DATABASE_URL` (fallback in-memory si absent). `docker-compose.yml` postgres:15. |
-| P2 | 🟡 | **Sauvegarde JSON périodique + Historique 7 jours** | ✅ Livré | v1.3.0 → v1.10.0 | `persistence.py` : snapshot toutes les 120 s, sauvegarde SIGTERM, rechargement au démarrage. **v1.10.0** : snapshot horodaté dans `data/snapshots/`, rotation automatique (configurable `SNAPSHOT_RETENTION_DAYS`, défaut 7j), index JSON `data/snapshots/index.json` (métadonnées : taille, nb_cards, nb_txns). `db_import.py` : `import_snapshot_to_db(path, dry_run)` — upsert cartes + insert transactions (skip doublons). `auto_recover()` — réimport automatique au démarrage après reconnexion DB. Endpoints : `GET /api/v1/snapshot/history`, `GET /api/v1/snapshot/latest`, `POST /api/v1/snapshot/save`, `POST /api/v1/snapshot/restore`, `POST /api/v1/snapshot/import`, `POST /api/v1/snapshot/recover`, `GET /api/v1/snapshot/import-history`. 35 tests. |
+| P2 | 🟡 | **Sauvegarde JSON périodique + Historique 7 jours** | ✅ Livré | v1.3.0 → v1.12.0 | `persistence.py` : snapshot toutes les 120 s, sauvegarde SIGTERM, rechargement au démarrage. **v1.10.0** : snapshot horodaté dans `data/snapshots/`, rotation automatique (configurable `SNAPSHOT_RETENTION_DAYS`, défaut 7j), index JSON `data/snapshots/index.json`. |
 | P3 | 🟡 | **Migrations de schéma** | ✅ Livré | v1.6.0 | Alembic intégré. Migration initiale `001_initial_schema.py`. `alembic upgrade head` automatique au démarrage si DATABASE_URL configurée. |
 | P4 | 🟢 | **Cache Redis** | ✅ Livré | v1.9.0 | `cache.py` : `CacheManager` singleton. Backend Redis (redis-py) si `REDIS_URL` configuré, sinon `InMemoryBackend` avec TTL intégré. API identique dans les deux cas. Utilisations : stats globales (TTL 5s), sessions 3DS2 (TTL 10min), lookup token→PAN_hash (TTL 1h). Fallback automatique si Redis indisponible. Endpoints : `GET /api/v1/cache/stats`, `DELETE /api/v1/cache/flush?prefix=`. 30 tests. |
+| P5 | 🔴 | **Persistance Hybride & Auto-Recover** | ✅ Livré | v1.13.0 | `persistence_manager.py` : Centralisation du cycle de vie. `auto_recover()` optimisé avec import par lot (session unique). Basculement transparent DB/Memory. Endpoint `POST /api/v1/snapshots/<file>/import`. 15 tests. |
 
 ---
 
@@ -55,6 +56,7 @@
 | C3 | 🟡 | **CB-PAY / Wallet NFC** | ✅ Livré | v1.7.0 | `emv/tokenization.py` : Token Service Provider simulé. Token HCE format PAN LUHN-valide, préfixe 4999. Token Vault en mémoire PAN↔Token (hash SHA-256). Domaines : HCE_MOBILE, ECOMMERCE, WALLET, ANY. Cycle de vie ACTIVE→SUSPENDED→DELETED. Détokenisation transparente dans `authorize()` step 0 (avant blacklist). Compteur d'utilisations (max_uses). Endpoints CRUD : `POST /api/v1/tokens`, `GET /api/v1/tokens`, `GET /api/v1/tokens/<id>`, `POST /api/v1/tokens/<id>/suspend`, `POST /api/v1/tokens/<id>/resume`, `DELETE /api/v1/tokens/<id>`, `GET /api/v1/tokens/pan/<pan>`, `GET /api/v1/tokens/stats`. 56 tests. |
 | C4 | 🟡 | **Issuer Script Processing (tag 71/72)** | ✅ Livré | v1.5.0 | `emv/issuer_scripts.py` : génération Tag 71 (avant transaction) / Tag 72 (après). UNBLOCK_PIN, UPDATE_RISK_PARAMS, PUT_DATA. Export hex + base64. 26 tests. |
 | C5 | 🟢 | **Scoring risque temps réel** | ✅ Livré | v1.5.0 | `emv/risk_scoring.py` : 5 facteurs (montant 30pts, vélocité 25pts, MCC 20pts, sans-contact 15pts, horaire 10pts). Niveaux LOW/MEDIUM/HIGH/CRITICAL. Décisions ALLOW/CHALLENGE/BLOCK. 32 tests. |
+| C6 | 🟢 | **Interface de Certification GIE CB** | ✅ Livré | v1.14.0 | `emv/certification.py` : `CertificationRunner` moteur de scénarios (CL_CUMUL_LIMIT, INVALID_ARQC, CARD_BLOCKED). Endpoints `/api/v1/certification/scenarios` et `/run/<id>`. Rapport détaillé des étapes. 12 tests. |
 
 ---
 
@@ -63,11 +65,12 @@
 | # | Priorité | Évolution | Statut | Version | Notes |
 |---|----------|-----------|--------|---------|-------|
 | D1 | 🟡 | **Graphiques temps réel (SSE)** | ✅ Livré | v1.3.0 | Chart.js + Server-Sent Events sur `/api/v1/stats/stream`. |
-| D2 | 🟡 | **Export CSV** | ✅ Livré | v1.3.0 | `GET /api/v1/transactions/export` : CSV avec en-têtes métier complets. |
+| D2 | 🟡 | **Export CSV / TXT / JSON** | ✅ Livré | v1.3.0 → v1.12.0 | `GET /api/v1/transactions/export` : formats variés avec en-têtes métier complets. |
 | D3 | 🟡 | **Documentation Swagger / OpenAPI 3.0** | ✅ Livré | v1.5.0 | Spec OpenAPI 3.0 sur `GET /api/v1/openapi.json`. Swagger UI interactif sur `GET /api/docs`. 13 tags, tous les nouveaux endpoints documentés. |
 | D4 | 🟡 | **Simulation de scénarios batch** | ✅ Livré | v1.3.0 | `POST /api/v1/batch/simulate` : N transactions avec cartes et montants variés. |
 | D5 | 🟢 | **Alertes visuelles** | ✅ Livré | v1.6.0 | `emv/alerts.py` : 7 types d'alertes (CONTACTLESS_CUMUL_HIGH, DAILY_LIMIT_APPROACHING, CARD_BLOCKED_HIGH, TRANSACTION_FAILURE_BURST, BIN_BLACKLIST_ACTIVITY, CHARGEBACK_SURGE, PREAUTH_EXPIRY_WARNING). Niveaux CRITICAL/WARNING/INFO. Endpoint `GET /api/v1/alerts`. Banner visuel CSS 3 couleurs. Polling JS 30 s. 23 tests. |
 | D6 | 🟢 | **Mode sombre / clair** | ✅ Livré | v1.3.0 | Toggle thème dans le dashboard (CSS variables + localStorage). |
+| D7 | 🟡 | **Statistiques SQL & Séries Temporelles** | ✅ Livré | v1.13.1 | `get_stats()` optimisé (SQL aggregations). `get_time_series_stats()` hourly. Endpoint `GET /api/v1/stats/time-series`. Gain perf massif sur gros volumes. 10 tests. |
 
 ---
 
@@ -79,7 +82,7 @@
 | A2 | 🟡 | **Mode dégradé simulé** | ✅ Livré | v1.8.0 | `emv/degraded.py` : `DegradedModeManager` singleton thread-safe. 5 types de pannes : TIMEOUT, NETWORK_ERROR, INTERNAL_ERROR, PARTIAL_FAILURE, SLOW_RESPONSE. Taux configurable (0–100%), latence injectée (ms + jitter). Config globale ou par endpoint. Middleware Flask `@before_request` (bypass `/api/v1/chaos`). Endpoints : `GET /api/v1/chaos`, `POST /api/v1/chaos/enable`, `POST /api/v1/chaos/disable`, `POST /api/v1/chaos/reset`, `POST /api/v1/chaos/endpoint`, `DELETE /api/v1/chaos/endpoint/<tag>`, `GET /api/v1/chaos/stats`. 35 tests. |
 | A3 | 🟡 | **Configuration YAML/TOML rechargeable** | ✅ Livré | v1.8.0 | `config_loader.py` : `ConfigManager` singleton. Charge `config.yaml` (PyYAML) ou `config.toml` (tomllib Python 3.11). Fusion profonde avec surcharge par variables d'environnement (`SEC__KEY` → `cfg.sec.key`). Hot-reload par thread de polling (10s). `config.yaml` par défaut inclus (11 sections). Endpoints : `GET /api/v1/config`, `POST /api/v1/config/reload`, `GET /api/v1/config/status`. 25 tests. |
 | A4 | 🟢 | **Client Python CLI** | ✅ Livré | v1.3.0 | `cli.py` : envoi d'autorisations, consultation transactions et stats. |
-| A5 | 🟢 | **Tests unitaires et d'intégration** | ✅ Livré | v1.9.0 | **1 609 tests** dans 32 fichiers. Crypto, TLV, CB rules, tranches, REST, TCP, chargebacks, préauths, BIN blacklist, devises, issuer scripts, risk scoring, webhooks, schemas Pydantic, alertes D5, ORM SQLAlchemy, 3DS2 (44), tokenisation (56), PKI (25), DDA/CDA (34), flux CB complet (45), mode dégradé (35), config loader (25), HSM (43), cache (30). Couverture > 90 %. |
+| A5 | 🟢 | **Tests unitaires et d'intégration** | ✅ Livré | v1.14.0 | **1 720 tests** dans 38 fichiers. Crypto, TLV, CB rules, tranches, REST, TCP, chargebacks, préauths, BIN blacklist, devises, issuer scripts, risk scoring, webhooks, schemas Pydantic, alertes D5, ORM SQLAlchemy, 3DS2 (44), tokenisation (56), PKI (25), DDA/CDA (34), flux CB complet (45), mode dégradé (35), config loader (25), HSM (43), cache (30), persistance hybride (15), stats SQL (10), certification (12). Couverture > 90 %. |
 | A6 | 🟢 | **Conteneurisation Docker** | ✅ Livré | v1.4.0 | `Dockerfile` multi-stage, `docker-compose.yml` avec ports 5000/8583, volume persistance, healthcheck. |
 
 ---
@@ -104,10 +107,11 @@
 | Version | Objectif | Statut | Priorité |
 |---------|----------|--------|----------|
 | v1.10.0 | Historique JSON 7 jours + import JSON → DB | ✅ Livré | Haute |
-| v1.11.0 | Export TXT/JSON des autorisations passées + endpoints de consultation enrichis | 🟡 À faire | Haute |
-| v1.12.0 | API de récupération assistée des snapshots + archivage avancé | 🟡 À faire | Moyenne |
-| v1.13.0 | Webhooks événementiels et audit exportable | 🟢 À planifier | Moyenne |
-| v1.14.0 | HA / multi-instance + persistance renforcée | 🟢 À planifier | Basse |
+| v1.12.0 | API de récupération assistée des snapshots + archivage avancé | ✅ Livré | Haute |
+| v1.13.0 | Persistance Hybride Robuste (PersistenceManager) | ✅ Livré | Haute |
+| v1.14.0 | Simulateur de Certification GIE CB + Stats SQL Optimisées | ✅ Livré | Moyenne |
+| v1.15.0 | Authentification PIN (Online/Offline) | 🟡 À faire | Moyenne |
+| v1.16.0 | Gestion des clés rotatives (Key Rotation) | 🟡 À faire | Basse |
 
 ---
 
@@ -116,30 +120,14 @@
 | Axe | Livré | Partiel | Non démarré | Total |
 |-----|-------|---------|-------------|-------|
 | Sécurité | 6 | 0 | 0 | 6 |
-| Persistance | 4 | 0 | 0 | 4 |
+| Persistance | 5 | 0 | 0 | 5 |
 | EMV | 8 | 0 | 0 | 8 |
-| GIE CB | 5 | 0 | 0 | 5 |
-| Dashboard | 6 | 0 | 0 | 6 |
+| GIE CB | 6 | 0 | 0 | 6 |
+| Dashboard | 7 | 0 | 0 | 7 |
 | Architecture | 6 | 0 | 0 | 6 |
 | Hors roadmap | 8 | — | — | 8 |
-| **Total** | **43** | **0** | **0** | **43** |
+| **Total** | **46** | **0** | **0** | **46** |
 
 ---
 
-## Roadmap complète — v1.10.0
-
-**Toutes les 43 features de la roadmap sont livrées.** ✅
-
-| Feature | Version | Statut |
-|---------|---------|--------|
-| S5 — HSM chiffrement RAM | v1.9.0 | ✅ Livré |
-| P4 — Cache Redis + fallback | v1.9.0 | ✅ Livré |
-| C1 — Flux CB complet | v1.8.0 | ✅ Livré |
-| A2 — Mode dégradé / Chaos | v1.8.0 | ✅ Livré |
-| A3 — Config YAML/TOML | v1.8.0 | ✅ Livré |
-| E2 — 3DS2 | v1.7.0 | ✅ Livré |
-| C2/C3/E3 — PKI/HCE/DDA | v1.7.0 | ✅ Livré |
-
----
-
-*Roadmap initiée le 02/05/2026 — mise à jour le 03/05/2026 · v1.10.0 — **43/43 features livrées** ✅*
+*Roadmap initiée le 02/05/2026 — mise à jour le 06/05/2026 · v1.14.0 — **46/46 features livrées** ✅*
