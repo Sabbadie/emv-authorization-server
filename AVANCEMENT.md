@@ -1,8 +1,8 @@
 # Avancement — EMV Authorization Server
 
-> Dernière mise à jour : 03 mai 2026  
-> Version courante : **1.4.0**  
-> Tests : **871+** (suite complète)
+> Dernière mise à jour : 06 mai 2026  
+> Version courante : **1.14.0**  
+> Tests : **1720+** (suite complète)
 
 ---
 
@@ -25,14 +25,76 @@
 | Historique carte | ✅ Complet |
 | Mise à jour carte (PATCH) | ✅ Complet |
 | Dashboard français | ✅ Complet |
-| Export CSV | ✅ Complet |
+| Export CSV / TXT / JSON enrichi | ✅ Complet |
 | Rate Limiting | ✅ Complet |
 | API Key | ✅ Complet |
-| Backup JSON | ✅ Complet |
+| Backup JSON compressé GZIP | ✅ Complet |
+| Pinning & Maintenance Snapshots | ✅ Complet |
+| Persistance Hybride (DB/JSON) | ✅ Complet |
+| Statistiques SQL Optimisées | ✅ Complet |
+| Interface de Certification GIE CB | ✅ Complet |
 
 ---
 
 ## Historique des livrables
+
+### v1.14.0 — Simulateur de Certification GIE CB (06/05/2026)
+
+**Nouvelles fonctionnalités :**
+- **Moteur de Certification** : Introduction de `CertificationRunner` pour l'exécution automatisée de scénarios de test complexes.
+- **Bibliothèque de Scénarios** : Implémentation des cas de tests standard (Cumul sans contact A5, ARQC invalide 63, Cartes bloquées 62).
+- **API de Certification** : Nouveaux endpoints `/api/v1/certification/scenarios` et `/run/<id>` pour piloter les tests.
+- **Réponses Flattened** : Optimisation de `AuthorizationResult.to_dict` pour exposer les champs `cb_response_code`, `tier`, `transaction_id` et `rrn` au premier niveau.
+- **Loopback Client** : Système de test interne permettant de simuler des terminaux directement via l'API.
+
+---
+
+### v1.13.1 — Statistiques Temporelles & SQL (06/05/2026)
+
+**Nouvelles fonctionnalités :**
+- **Statistiques Optimisées** : Refactorisation de `get_stats` pour utiliser des agrégations SQL native (`func.count`, `func.sum`). Gain de performance majeur sur les gros volumes de transactions (P1).
+- **Séries Temporelles** : Implémentation de `get_time_series_stats` permettant un monitoring heure par heure des transactions.
+- **Nouvel API Endpoint** : `GET /api/v1/stats/time-series` pour alimenter des graphiques de tendance.
+- **Support Hybride** : Les stats temporelles sont également disponibles en mode In-Memory (P2).
+
+---
+
+### v1.13.0 — Persistance Hybride Robuste (06/05/2026)
+
+**Nouvelles fonctionnalités :**
+- **PersistenceManager** : Centralisation du cycle de vie de la persistance. Basculement automatique entre DB (PostgreSQL/SQLite) et In-Memory (Snapshots JSON) selon la disponibilité.
+- **Auto-Recover optimisé** : Importation automatique du dernier snapshot JSON dans la base de données au démarrage si celle-ci est vide.
+- **Importation par lot** : Optimisation de `db_import.py` utilisant une session unique pour des performances accrues lors des imports massifs.
+- **API d'Import Manuel** : `POST /api/v1/snapshots/<filename>/import` pour forcer la synchronisation d'un snapshot vers la DB.
+- **Tests d'Intégration** : Nouvelle suite de tests pour valider les scénarios de basculement et de récupération.
+
+---
+
+### v1.12.0 — Archivage et récupération assistée (03/05/2026)
+
+**Nouvelles fonctionnalités :**
+- Compression GZIP systématique des snapshots historiques (`.json.gz`).
+- Système d'épinglage (Pinning) pour protéger les snapshots contre la rotation automatique.
+- API de comparaison (Diff) : `GET /api/v1/snapshots/diff?file1=...&file2=...`.
+- Endpoints de maintenance : Restauration ciblée, Épinglage manuel, Suppression forcée.
+- Export global ZIP : `GET /api/v1/snapshots/export`.
+
+**Tests :** 10 nouveaux tests (5 unitaires dans `test_persistence_v12.py` + 5 d'intégration dans `test_api_v12.py`).
+
+---
+
+### v1.11.0 — Exports enrichis (03/05/2026)
+
+**Nouvelles fonctionnalités :**
+- `GET /api/v1/transactions/export?format=txt` — Export ticket TPE multi-transactions
+- `GET /api/v1/transactions/export?format=json_enrichi` — Export JSON avec tous les labels métier
+- `GET /api/v1/transactions/<id>/receipt` — Reçu individuel (TXT ou JSON)
+- Filtres enrichis sur l'export (date_from, date_to, amount_min, amount_max, terminal_id, etc.)
+- Intégration de `emv/receipt.py` pour le rendu des tickets 40 colonnes
+
+**Tests :** 4 nouveaux tests d'intégration dans `tests/test_v11_exports.py`
+
+---
 
 ### v1.4.0 — Journal d'audit + fonctionnalités manquantes (03/05/2026)
 

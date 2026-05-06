@@ -234,6 +234,20 @@ class TransactionLog:
             cb_scheme=cb_scheme, auth_path=auth_path, rrn=rrn,
         ))
 
+    def get_time_series_stats(self, hours=24):
+        """Version in-memory des statistiques temporelles."""
+        from datetime import datetime, timedelta
+        since = (datetime.utcnow() - timedelta(hours=hours)).isoformat()
+        
+        counts = {}
+        for t in self._transactions.values():
+            if t.created_at >= since:
+                hour = t.created_at[:13] # YYYY-MM-DDTHH
+                counts[hour] = counts.get(hour, 0) + 1
+        
+        sorted_keys = sorted(counts.keys())
+        return [{"hour": k, "count": counts[k]} for k in sorted_keys]
+
     def get_stats(self):
         total         = len(self._transactions)
         approved      = sum(1 for t in self._transactions.values()

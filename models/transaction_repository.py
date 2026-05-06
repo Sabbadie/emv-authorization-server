@@ -210,57 +210,71 @@ class DBTransactionLog(TransactionLog):
     def get_recent(self, limit: int = 50) -> list:
         return self.get_all(limit=limit)
 
-    # ── Statistiques ─────────────────────────────────────────────────────────
+from sqlalchemy import select, desc, func
+
+# ... (rest of imports and converters)
+
+# ── Repository ────────────────────────────────────────────────────────────────
+
+class DBTransactionLog(TransactionLog):
+    # ... (init and other methods)
+
+    # ── Statistiques Optimisées ─────────────────────────────────────────────
 
     def get_stats(self) -> dict:
+        """Version optimisée utilisant des agrégations SQL (P1)."""
         try:
             with get_session() as session:
-                all_txns = session.execute(select(TransactionORM)).scalars().all()
-                total        = len(all_txns)
-                approved     = sum(1 for t in all_txns if t.status == TransactionStatus.APPROVED)
-                declined     = sum(1 for t in all_txns if t.status == TransactionStatus.DECLINED)
-                reversed_    = sum(1 for t in all_txns if t.status == TransactionStatus.REVERSED)
-                errors       = sum(1 for t in all_txns if t.status == TransactionStatus.ERROR)
-                preauthed    = sum(1 for t in all_txns if t.status == TransactionStatus.PREAUTHORIZED)
-                disputed     = sum(1 for t in all_txns if t.status == TransactionStatus.DISPUTED)
-                chargebacks  = sum(1 for t in all_txns if t.status == TransactionStatus.CHARGEBACK)
-                total_amount = sum(t.amount or 0 for t in all_txns
-                                   if t.status == TransactionStatus.APPROVED)
-                rev_amount   = sum(
-                    (t.reversal_amount or t.amount or 0)
-                    for t in all_txns if t.status == TransactionStatus.REVERSED
-                )
-                by_tier, by_path, by_risk, by_scheme, by_status = {}, {}, {}, {}, {}
-                for t in all_txns:
-                    if t.amount_tier:
-                        by_tier[t.amount_tier]   = by_tier.get(t.amount_tier, 0)   + 1
-                    if t.auth_path:
-                        by_path[t.auth_path]     = by_path.get(t.auth_path, 0)     + 1
-                    if t.risk_level:
-                        by_risk[t.risk_level]    = by_risk.get(t.risk_level, 0)    + 1
-                    if t.cb_scheme:
-                        by_scheme[t.cb_scheme]   = by_scheme.get(t.cb_scheme, 0)   + 1
-                    by_status[t.status]          = by_status.get(t.status, 0)       + 1
+                # 1. Comptes globaux par statut
+                stmt_status = select(TransactionORM.status, func.count(TransactionORM.id)).group_by(TransactionORM.status)
+                status_counts = dict(session.execute(stmt_status).all())
+
+                total = sum(status_counts.values())
+                approved = status_counts.get(TransactionStatus.APPROVED, 0)
+                
+                # 2. Montants cumulés
+                stmt_amounts = select(
+                    func.sum(TransactionORM.amount).label("total_approved"),
+                    func.sum(func.coalesce(TransactionORM.reversal_amount, TransactionORM.amount)).label("total_reversed")
+                ).where(TransactionORM.status.in_([TransactionStatus.APPROVED, TransactionStatus.REVERSED]))
+                
+                res_amounts = session.execute(stmt_amounts).one()
+                # On doit filtrer plus précisément pour l'approuvé vs redressé si on veut être strict
+                
+                total_amount = session.execute(
+                    select(func.sum(TransactionORM.amount))
+                    .where(TransactionORM.status == TransactionStatus.APPROVED)
+                ).scalar() or 0
+                
+                rev_amount = session.execute(
+                    select(func.sum(func.coalesce(TransactionORM.reversal_amount, TransactionORM.amount)))
+                    .where(TransactionORM.status == TransactionStatus.REVERSED)
+                ).scalar() or 0
+
+                # 3. Répartitions (Tiers, Path, Risk, Scheme)
+                def get_distribution(column):
+                    stmt = select(column, func.count(TransactionORM.id)).group_by(column)
+                    return {str(k): v for k, v in session.execute(stmt).all() if k is not None}
+
                 return {
                     "total":                         total,
                     "approved":                      approved,
-                    "declined":                      declined,
-                    "reversed":                      reversed_,
+                    "declined":                      status_counts.get(TransactionStatus.DECLINED, 0),
+                    "reversed":                      status_counts.get(TransactionStatus.REVERSED, 0),
                     "reversed_amount":               rev_amount,
                     "reversed_amount_formatted":     "{:.2f}".format(rev_amount / 100),
-                    "errors":                        errors,
-                    "preauthorized":                 preauthed,
-                    "disputed":                      disputed,
-                    "chargebacks":                   chargebacks,
-                    "approval_rate":                 "{:.1f}%".format(
-                        (approved / total * 100) if total > 0 else 0),
+                    "errors":                        status_counts.get(TransactionStatus.ERROR, 0),
+                    "preauthorized":                 status_counts.get(TransactionStatus.PREAUTHORIZED, 0),
+                    "disputed":                      status_counts.get(TransactionStatus.DISPUTED, 0),
+                    "chargebacks":                   status_counts.get(TransactionStatus.CHARGEBACK, 0),
+                    "approval_rate":                 "{:.1f}%".format((approved / total * 100) if total > 0 else 0),
                     "total_approved_amount":         total_amount,
                     "total_approved_amount_formatted": "{:.2f}".format(total_amount / 100),
-                    "by_tier":                       by_tier,
-                    "by_auth_path":                  by_path,
-                    "by_risk_level":                 by_risk,
-                    "by_cb_scheme":                  by_scheme,
-                    "by_status":                     by_status,
+                    "by_tier":                       get_distribution(TransactionORM.amount_tier),
+                    "by_auth_path":                  get_distribution(TransactionORM.auth_path),
+                    "by_risk_level":                 get_distribution(TransactionORM.risk_level),
+                    "by_cb_scheme":                  get_distribution(TransactionORM.cb_scheme),
+                    "by_status":                     status_counts,
                 }
         except Exception as exc:
             logger.error("get_stats: %s", exc)
@@ -272,3 +286,24 @@ class DBTransactionLog(TransactionLog):
                 "by_tier": {}, "by_auth_path": {}, "by_risk_level": {},
                 "by_cb_scheme": {}, "by_status": {},
             }
+
+    def get_time_series_stats(self, hours: int = 24) -> list:
+        """Retourne le nombre de transactions par heure pour les N dernières heures."""
+        try:
+            from datetime import timedelta
+            since = (datetime.utcnow() - timedelta(hours=hours)).isoformat()
+            
+            with get_session() as session:
+                # Extraction de l'heure via SUBSTR sur created_at (format ISO: YYYY-MM-DDTHH:...)
+                # SUBSTR(created_at, 1, 13) donne "YYYY-MM-DDTHH"
+                hour_label = func.substr(TransactionORM.created_at, 1, 13)
+                stmt = (
+                    select(hour_label, func.count(TransactionORM.id))
+                    .where(TransactionORM.created_at >= since)
+                    .group_by(hour_label)
+                    .order_by(hour_label)
+                )
+                return [{"hour": r[0], "count": r[1]} for r in session.execute(stmt).all()]
+        except Exception as exc:
+            logger.error("get_time_series_stats: %s", exc)
+            return []

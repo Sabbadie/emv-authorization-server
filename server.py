@@ -9,9 +9,11 @@ import csv
 import io
 import json
 import logging
+import os
 import random
 import re
 import time
+import zipfile
 from datetime import datetime
 
 from flask import Flask, request, jsonify, render_template_string, Response, stream_with_context
@@ -47,6 +49,7 @@ from emv.tokenization import (create_token, get_token, get_tokens_by_pan,
                                delete_token, get_all_tokens, get_token_stats)
 from emv.pki import get_full_pki_info, is_available as pki_is_available
 from emv.dda_cda import sign_dda, verify_dda, sign_cda, verify_cda, is_available_dda_cda
+from emv.receipt import format_receipt, format_bulk_receipt_txt
 from iso8583.message import parse_from_dict
 from models.card import card_db, Card, CardStatus
 from models.transaction import transaction_log, TransactionStatus
@@ -66,7 +69,8 @@ from emv.hsm import get_hsm, SimulatedHSM
 from cache import get_cache, CacheManager
 from persistence import (list_snapshots, get_latest_snapshot_path,
                           load_snapshot, save_snapshot, SNAPSHOT_FILE,
-                          SNAPSHOT_DIR, SNAPSHOT_RETENTION)
+                          SNAPSHOT_DIR, SNAPSHOT_RETENTION, SNAPSHOT_INDEX_FILE,
+                          diff_snapshots, _write_json_atomic, _load_index)
 from db_import import import_snapshot_to_db, auto_recover, get_import_history
 
 # ── S3 : Masquage PAN dans les logs ─────────────────────────────────────────
@@ -1582,6 +1586,174 @@ def stats_stream():
 
 # ── D2 : Export CSV / JSON ────────────────────────────────────────────────────
 
+
+# ── P2 : Maintenance des Snapshots (v1.12.0) ──────────────────────────────────
+
+from emv.certification import CertificationRunner, CB_CERT_SCENARIOS
+
+# ...
+
+@app.route("/api/v1/certification/scenarios", methods=["GET"])
+def list_cert_scenarios():
+    """Liste les scénarios de certification disponibles."""
+    return jsonify([
+        {"id": s.name, "description": s.description, "steps": len(s.steps)}
+        for s in CB_CERT_SCENARIOS
+    ])
+
+@app.route("/api/v1/certification/run/<scenario_id>", methods=["POST"])
+def run_cert_scenario(scenario_id):
+    """Exécute un scénario de certification."""
+    scenario = next((s for s in CB_CERT_SCENARIOS if s.name == scenario_id), None)
+    if not scenario:
+        return jsonify({"error": "Scénario introuvable"}), 404
+
+    # Pour les tests internes, on utilise un client "loopback"
+    class LoopbackClient:
+        def send(self, request):
+            if "admin_action" in request:
+                if request["admin_action"] == "block":
+                    ok = card_db.block_card(request["pan"], "Certification")
+                    return {"success": ok}
+                return {"success": False}
+            
+            # Appel direct à la logique d'autorisation
+            with app.test_request_context(json=request):
+                # On appelle le endpoint Flask directement
+                resp = authorize_endpoint()
+                return resp.get_json()
+
+    runner = CertificationRunner(LoopbackClient())
+    report = runner.run_scenario(scenario)
+    return jsonify(report)
+
+
+@app.route("/api/v1/snapshots", methods=["GET"])
+def get_snapshots():
+    """Liste les snapshots disponibles (avec détails v1.12.0)."""
+    return jsonify({
+        "snapshots": list_snapshots(),
+        "retention_days": SNAPSHOT_RETENTION,
+        "index_updated_at": _load_index().get("updated_at")
+    })
+
+
+@app.route("/api/v1/snapshots/diff", methods=["GET"])
+def get_snapshots_diff():
+    """Compare deux snapshots spécifiés par leur filename."""
+    file1 = request.args.get("file1")
+    file2 = request.args.get("file2")
+    if not file1 or not file2:
+        return jsonify({"error": "Paramètres file1 et file2 requis"}), 400
+
+    path1 = os.path.join(SNAPSHOT_DIR, file1)
+    path2 = os.path.join(SNAPSHOT_DIR, file2)
+
+    if not os.path.exists(path1) or not os.path.exists(path2):
+        return jsonify({"error": "Un ou plusieurs fichiers introuvables"}), 404
+
+    return jsonify(diff_snapshots(path1, path2))
+
+
+@app.route("/api/v1/snapshots/<filename>/restore", methods=["POST"])
+def restore_snapshot_api(filename):
+    """Restaure un snapshot spécifique en mémoire."""
+    path = os.path.join(SNAPSHOT_DIR, filename)
+    if not os.path.exists(path):
+        return jsonify({"error": "Snapshot introuvable"}), 404
+
+    success = load_snapshot(card_db, transaction_log, path=path)
+    if success:
+        return jsonify({"success": True, "message": "Snapshot restauré en mémoire"})
+    return jsonify({"error": "Échec de la restauration"}), 500
+
+
+@app.route("/api/v1/snapshots/<filename>/pin", methods=["POST"])
+def toggle_snapshot_pin(filename):
+    """Épingle ou désépingle un snapshot pour la rotation."""
+    index = _load_index()
+    found = False
+    for s in index.get("snapshots", []):
+        if s.get("filename") == filename:
+            s["pinned"] = not s.get("pinned", False)
+            found = True
+            break
+    
+    if not found:
+        return jsonify({"error": "Snapshot non indexé"}), 404
+    
+    index["updated_at"] = datetime.utcnow().isoformat() + "Z"
+    _write_json_atomic(SNAPSHOT_INDEX_FILE, index)
+    return jsonify({"success": True, "filename": filename, "pinned": s["pinned"]})
+
+
+@app.route("/api/v1/snapshots/<filename>/import", methods=["POST"])
+def import_snapshot_api(filename):
+    """Importe manuellement un snapshot dans la base de données (P1/P2)."""
+    path = os.path.join(SNAPSHOT_DIR, filename)
+    if not os.path.exists(path):
+        return jsonify({"error": "Snapshot introuvable"}), 404
+
+    dry_run = request.args.get("dry_run", "false").lower() == "true"
+    result = import_snapshot_to_db(path, dry_run=dry_run)
+    
+    if result["success"]:
+        return jsonify(result)
+    return jsonify(result), 500
+
+
+@app.route("/api/v1/snapshots/<filename>", methods=["DELETE"])
+def delete_snapshot_api(filename):
+    """Supprime un snapshot manuellement."""
+    path = os.path.join(SNAPSHOT_DIR, filename)
+    if not os.path.exists(path):
+        return jsonify({"error": "Fichier introuvable"}), 404
+
+    index = _load_index()
+    entry = next((s for s in index.get("snapshots", []) if s.get("filename") == filename), None)
+    
+    if entry and entry.get("pinned") and request.args.get("force") != "true":
+        return jsonify({"error": "Fichier épinglé. Utilisez ?force=true"}), 403
+
+    try:
+        os.remove(path)
+        # Nettoyage de l'index
+        index["snapshots"] = [s for s in index.get("snapshots", []) if s.get("filename") != filename]
+        index["updated_at"] = datetime.utcnow().isoformat() + "Z"
+        _write_json_atomic(SNAPSHOT_INDEX_FILE, index)
+        return jsonify({"success": True, "message": "Snapshot supprimé"})
+    except Exception as e:
+        return jsonify({"error": str(e)}), 500
+
+
+@app.route("/api/v1/snapshots/export", methods=["GET"])
+def export_snapshots_zip():
+    """Exporte tous les snapshots (ou une sélection) dans un fichier ZIP."""
+    files = request.args.getlist("files")
+    if not files:
+        # Par défaut, tous les fichiers de SNAPSHOT_DIR
+        files = [f for f in os.listdir(SNAPSHOT_DIR) if f.endswith((".json", ".gz")) and f != "index.json"]
+
+    memory_file = io.BytesIO()
+    with zipfile.ZipFile(memory_file, "w", zipfile.ZIP_DEFLATED) as zf:
+        for filename in files:
+            path = os.path.join(SNAPSHOT_DIR, filename)
+            if os.path.exists(path):
+                zf.write(path, filename)
+    
+    memory_file.seek(0)
+    return Response(
+        memory_file.getvalue(),
+        mimetype="application/zip",
+        headers={
+            "Content-Disposition": "attachment; filename=snapshots_export_{}.zip".format(
+                datetime.utcnow().strftime("%Y%m%d_%H%M%S"))
+        }
+    )
+
+
+# ── D2 : Export CSV / JSON ────────────────────────────────────────────────────
+
 @app.route("/api/v1/transactions/export", methods=["GET"])
 def export_transactions():
     fmt = request.args.get("format", "json").lower()
@@ -1589,12 +1761,29 @@ def export_transactions():
         limit = min(int(request.args.get("limit", 2000)), 5000)
     except (ValueError, TypeError):
         limit = 2000
-    status_filter = request.args.get("status")
-    tier_filter = request.args.get("tier")
 
-    transactions = transaction_log.get_all(
-        limit=limit, offset=0,
-        status=status_filter, tier=tier_filter)
+    # Filtres enrichis (v1.11.0)
+    filters = dict(
+        status      = request.args.get("status"),
+        tier        = request.args.get("tier"),
+        date_from   = request.args.get("date_from"),
+        date_to     = request.args.get("date_to"),
+        terminal_id = request.args.get("terminal_id"),
+        merchant_id = request.args.get("merchant_id"),
+        cb_scheme   = request.args.get("cb_scheme"),
+        auth_path   = request.args.get("auth_path"),
+        rrn         = request.args.get("rrn"),
+    )
+    try:
+        if request.args.get("amount_min") is not None:
+            filters["amount_min"] = int(request.args.get("amount_min"))
+        if request.args.get("amount_max") is not None:
+            filters["amount_max"] = int(request.args.get("amount_max"))
+    except (ValueError, TypeError):
+        return jsonify({"error": "amount_min/amount_max must be integers"}), 400
+
+    filters = {k: v for k, v in filters.items() if v is not None}
+    transactions = transaction_log.get_all(limit=limit, offset=0, **filters)
 
     if fmt == "csv":
         output = io.StringIO()
@@ -1629,11 +1818,27 @@ def export_transactions():
             headers={"Content-Disposition":
                      "attachment; filename=transactions_{}.csv".format(
                          datetime.utcnow().strftime("%Y%m%d_%H%M%S"))})
+    elif fmt == "txt":
+        txt_content = format_bulk_receipt_txt(transactions)
+        return Response(
+            txt_content,
+            mimetype="text/plain; charset=utf-8",
+            headers={"Content-Disposition":
+                     "attachment; filename=transactions_{}.txt".format(
+                         datetime.utcnow().strftime("%Y%m%d_%H%M%S"))})
+    elif fmt == "json_enrichi":
+        return jsonify({
+            "transactions": [format_receipt(t, fmt="json") for t in transactions],
+            "count": len(transactions),
+            "exported_at": datetime.utcnow().isoformat() + "Z",
+            "filters": filters
+        })
     else:
         return jsonify({
             "transactions": [t.to_dict() for t in transactions],
             "count": len(transactions),
             "exported_at": datetime.utcnow().isoformat() + "Z",
+            "filters": filters
         })
 
 
@@ -1686,7 +1891,27 @@ def get_transaction(transaction_id):
     txn = transaction_log.get(transaction_id)
     if not txn:
         return jsonify({"error": "Transaction not found"}), 404
-    result = txn.to_dict()
+    return jsonify(txn.to_dict())
+
+
+@app.route("/api/v1/transactions/<transaction_id>/receipt", methods=["GET"])
+def get_transaction_receipt(transaction_id):
+    """
+    Retourne le reçu formaté d'une transaction (v1.11.0).
+    Formats : txt (ticket TPE), json (enrichi).
+    """
+    fmt = request.args.get("format", "txt").lower()
+    txn = transaction_log.get(transaction_id)
+    if not txn:
+        return jsonify({"error": "Transaction not found"}), 404
+
+    receipt = format_receipt(txn, fmt=fmt)
+
+    if fmt == "txt":
+        return Response(receipt, mimetype="text/plain; charset=utf-8")
+    else:
+        return jsonify(receipt)
+
     tpa = TPAResponse(txn, type("R", (), {
         "approved": txn.status == "APPROVED",
         "response_code": txn.response_code,
@@ -2310,6 +2535,14 @@ def unblock_card(pan):
 
 
 # ── Stats ─────────────────────────────────────────────────────────────────────
+
+@app.route("/api/v1/stats/time-series", methods=["GET"])
+def get_time_series_api():
+    """Retourne les stats temporelles (P1/P2)."""
+    hours = min(int(request.args.get("hours", 24)), 168) # max 1 semaine
+    stats = transaction_log.get_time_series_stats(hours=hours)
+    return jsonify(stats)
+
 
 @app.route("/api/v1/stats", methods=["GET"])
 def get_stats():

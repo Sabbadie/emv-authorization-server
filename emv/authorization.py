@@ -64,10 +64,17 @@ class AuthorizationResult:
             result["arpc"] = self.arpc
         if self.amount_decision:
             result["amount_decision"] = self.amount_decision.to_dict()
+            result["tier"] = self.amount_decision.tier.name
+            result["auth_path"] = self.amount_decision.auth_path
         if self.cb_result:
             result["cb_result"] = self.cb_result.to_dict()
+            result["cb_response_code"] = self.cb_result.cb_response_code
+            result["cb_service_indicator"] = self.cb_result.service_indicator
         if self.transaction:
             result["transaction"] = self.transaction.to_dict()
+            result["transaction_id"] = self.transaction.id
+            result["rrn"] = self.transaction.rrn
+            result["pan_masked"] = result["transaction"]["pan"]
         if include_tpa and self.tpa:
             result["tpa_response"] = self.tpa.to_dict(include_definitions=True)
         # E2/C3/E3 extensions

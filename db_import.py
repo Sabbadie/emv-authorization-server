@@ -16,9 +16,10 @@ Utilisation :
 """
 
 import json
+import gzip
 import logging
 import os
-from datetime import datetime
+from datetime import datetime, UTC
 from typing import Optional
 
 logger = logging.getLogger(__name__)
@@ -41,18 +42,12 @@ except ImportError:
 def import_snapshot_to_db(path: str, *, dry_run: bool = False) -> dict:
     """
     Importe un snapshot JSON dans la base de données.
-
-    Args:
-        path    : chemin vers le fichier snapshot JSON
-        dry_run : si True, simule l'import sans écrire dans la DB
-
-    Returns:
-        dict avec compteurs d'import et éventuelles erreurs
+    Optimisé pour utiliser une seule session pour l'ensemble de l'import.
     """
     result = {
         "path":           path,
         "dry_run":        dry_run,
-        "started_at":     datetime.utcnow().isoformat() + "Z",
+        "started_at":     datetime.now(UTC).isoformat() + "Z",
         "cards_inserted": 0,
         "cards_updated":  0,
         "cards_skipped":  0,
@@ -67,8 +62,12 @@ def import_snapshot_to_db(path: str, *, dry_run: bool = False) -> dict:
         return result
 
     try:
-        with open(path, "r", encoding="utf-8") as f:
-            snap = json.load(f)
+        if path.endswith(".gz"):
+            with gzip.open(path, "rt", encoding="utf-8") as f:
+                snap = json.load(f)
+        else:
+            with open(path, "r", encoding="utf-8") as f:
+                snap = json.load(f)
     except Exception as e:
         result["errors"].append("Erreur lecture JSON : {}".format(e))
         return result
@@ -86,65 +85,68 @@ def import_snapshot_to_db(path: str, *, dry_run: bool = False) -> dict:
         result["errors"].append("Base de données indisponible — import impossible")
         return result
 
-    _import_cards(snap.get("cards", []), result, dry_run)
-    _import_transactions(snap.get("transactions", []), result, dry_run)
+    if dry_run:
+        result["cards_inserted"] = len(snap.get("cards", []))
+        result["txns_inserted"] = len(snap.get("transactions", []))
+    else:
+        try:
+            with get_session() as session:
+                _import_cards(snap.get("cards", []), result, session)
+                _import_transactions(snap.get("transactions", []), result, session)
+                session.commit()
+        except Exception as e:
+            result["errors"].append("Erreur lors du commit global : {}".format(e))
 
-    result["finished_at"] = datetime.utcnow().isoformat() + "Z"
+    result["finished_at"] = datetime.now(UTC).isoformat() + "Z"
     result["success"]     = len(result["errors"]) == 0
     return result
 
 
 # ── Import cartes ──────────────────────────────────────────────────────────────
 
-def _import_cards(cards_data: list, result: dict, dry_run: bool):
-    """Upsert des cartes dans la DB ORM."""
+def _import_cards(cards_data: list, result: dict, session):
+    """Upsert des cartes dans la DB ORM via une session ouverte."""
     for cd in cards_data:
         pan = cd.get("pan")
         if not pan:
             result["cards_skipped"] += 1
             continue
         try:
-            if dry_run:
+            existing = session.get(CardORM, pan)
+            if existing is None:
+                new_card = CardORM(
+                    pan                 = pan,
+                    expiry              = cd.get("expiry", "9912"),
+                    cardholder_name     = cd.get("cardholder_name", ""),
+                    psn                 = cd.get("psn", "00"),
+                    status              = cd.get("status", "ACTIVE"),
+                    balance             = cd.get("balance", 0),
+                    daily_limit         = cd.get("daily_limit", 300000),
+                    daily_spent         = cd.get("daily_spent", 0),
+                    last_reset_date     = cd.get("last_reset_date"),
+                    last_atc            = cd.get("last_atc", 0),
+                    block_reason        = cd.get("block_reason"),
+                    blocked_at          = cd.get("blocked_at"),
+                    block_history       = json.dumps(cd.get("block_history", [])),
+                    cb_scheme           = cd.get("cb_scheme", ""),
+                    cb_brand            = cd.get("cb_brand", ""),
+                    aid                 = cd.get("aid"),
+                    contactless_cumul   = cd.get("contactless_cumul", 0),
+                    consecutive_offline = cd.get("consecutive_offline", 0),
+                    pin_tries           = cd.get("pin_tries", 0),
+                )
+                session.add(new_card)
                 result["cards_inserted"] += 1
-                continue
-            with get_session() as session:
-                existing = session.get(CardORM, pan)
-                if existing is None:
-                    new_card = CardORM(
-                        pan                 = pan,
-                        expiry              = cd.get("expiry", "9912"),
-                        cardholder_name     = cd.get("cardholder_name", ""),
-                        psn                 = cd.get("psn", "00"),
-                        status              = cd.get("status", "ACTIVE"),
-                        balance             = cd.get("balance", 0),
-                        daily_limit         = cd.get("daily_limit", 300000),
-                        daily_spent         = cd.get("daily_spent", 0),
-                        last_reset_date     = cd.get("last_reset_date"),
-                        last_atc            = cd.get("last_atc", 0),
-                        block_reason        = cd.get("block_reason"),
-                        blocked_at          = cd.get("blocked_at"),
-                        block_history       = json.dumps(cd.get("block_history", [])),
-                        cb_scheme           = cd.get("cb_scheme", ""),
-                        cb_brand            = cd.get("cb_brand", ""),
-                        aid                 = cd.get("aid"),
-                        contactless_cumul   = cd.get("contactless_cumul", 0),
-                        consecutive_offline = cd.get("consecutive_offline", 0),
-                        pin_tries           = cd.get("pin_tries", 0),
-                    )
-                    session.add(new_card)
-                    session.commit()
-                    result["cards_inserted"] += 1
-                else:
-                    existing.balance             = cd.get("balance", existing.balance)
-                    existing.daily_spent         = cd.get("daily_spent", existing.daily_spent)
-                    existing.status              = cd.get("status", existing.status)
-                    existing.last_atc            = cd.get("last_atc", existing.last_atc)
-                    existing.block_reason        = cd.get("block_reason", existing.block_reason)
-                    existing.contactless_cumul   = cd.get("contactless_cumul", existing.contactless_cumul)
-                    existing.consecutive_offline = cd.get("consecutive_offline", existing.consecutive_offline)
-                    existing.pin_tries           = cd.get("pin_tries", existing.pin_tries)
-                    session.commit()
-                    result["cards_updated"] += 1
+            else:
+                existing.balance             = cd.get("balance", existing.balance)
+                existing.daily_spent         = cd.get("daily_spent", existing.daily_spent)
+                existing.status              = cd.get("status", existing.status)
+                existing.last_atc            = cd.get("last_atc", existing.last_atc)
+                existing.block_reason        = cd.get("block_reason", existing.block_reason)
+                existing.contactless_cumul   = cd.get("contactless_cumul", existing.contactless_cumul)
+                existing.consecutive_offline = cd.get("consecutive_offline", existing.consecutive_offline)
+                existing.pin_tries           = cd.get("pin_tries", existing.pin_tries)
+                result["cards_updated"] += 1
         except Exception as e:
             result["errors"].append("Carte {} : {}".format(pan, str(e)))
             result["cards_skipped"] += 1
@@ -152,59 +154,54 @@ def _import_cards(cards_data: list, result: dict, dry_run: bool):
 
 # ── Import transactions ────────────────────────────────────────────────────────
 
-def _import_transactions(txns_data: list, result: dict, dry_run: bool):
-    """Insert des transactions dans la DB ORM (skip si ID existant)."""
+def _import_transactions(txns_data: list, result: dict, session):
+    """Insert des transactions dans la DB ORM (skip si ID existant) via une session ouverte."""
     for td in txns_data:
         txn_id = td.get("id")
         if not txn_id:
             result["txns_skipped"] += 1
             continue
         try:
-            if dry_run:
-                result["txns_inserted"] += 1
+            existing = session.get(TransactionORM, txn_id)
+            if existing is not None:
+                result["txns_skipped"] += 1
                 continue
-            with get_session() as session:
-                existing = session.get(TransactionORM, txn_id)
-                if existing is not None:
-                    result["txns_skipped"] += 1
-                    continue
-                new_txn = TransactionORM(
-                    id                   = txn_id,
-                    rrn                  = td.get("rrn", ""),
-                    pan                  = td.get("pan", ""),
-                    amount               = td.get("amount", 0),
-                    currency             = td.get("currency", "978"),
-                    transaction_type     = td.get("transaction_type", "00"),
-                    terminal_id          = td.get("terminal_id"),
-                    merchant_id          = td.get("merchant_id"),
-                    merchant_name        = td.get("merchant_name"),
-                    atc                  = td.get("atc"),
-                    arqc                 = td.get("arqc"),
-                    arpc                 = td.get("arpc"),
-                    issuer_auth_data     = td.get("issuer_auth_data"),
-                    auth_code            = td.get("auth_code"),
-                    status               = td.get("status", "PENDING"),
-                    response_code        = td.get("response_code"),
-                    decline_reason       = td.get("decline_reason"),
-                    pos_entry_mode       = td.get("pos_entry_mode"),
-                    amount_tier          = td.get("amount_tier"),
-                    risk_level           = td.get("risk_level"),
-                    auth_path            = td.get("auth_path"),
-                    cb_scheme            = td.get("cb_scheme"),
-                    cb_brand             = td.get("cb_brand"),
-                    cb_service_indicator = td.get("cb_service_indicator"),
-                    cb_sca_exemption     = td.get("cb_sca_exemption"),
-                    cb_floor_limit       = td.get("cb_floor_limit"),
-                    cb_is_contactless    = td.get("cb_is_contactless", False),
-                    cb_response_code     = td.get("cb_response_code"),
-                    cb_decline_reason    = td.get("cb_decline_reason"),
-                    created_at           = td.get("created_at",
-                                                   datetime.utcnow().isoformat()),
-                    processed_at         = td.get("processed_at"),
-                )
-                session.add(new_txn)
-                session.commit()
-                result["txns_inserted"] += 1
+            new_txn = TransactionORM(
+                id                   = txn_id,
+                rrn                  = td.get("rrn", ""),
+                pan                  = td.get("pan", ""),
+                amount               = td.get("amount", 0),
+                currency             = td.get("currency", "978"),
+                transaction_type     = td.get("transaction_type", "00"),
+                terminal_id          = td.get("terminal_id"),
+                merchant_id          = td.get("merchant_id"),
+                merchant_name        = td.get("merchant_name"),
+                atc                  = td.get("atc"),
+                arqc                 = td.get("arqc"),
+                arpc                 = td.get("arpc"),
+                issuer_auth_data     = td.get("issuer_auth_data"),
+                auth_code            = td.get("auth_code"),
+                status               = td.get("status", "PENDING"),
+                response_code        = td.get("response_code"),
+                decline_reason       = td.get("decline_reason"),
+                pos_entry_mode       = td.get("pos_entry_mode"),
+                amount_tier          = td.get("amount_tier"),
+                risk_level           = td.get("risk_level"),
+                auth_path            = td.get("auth_path"),
+                cb_scheme            = td.get("cb_scheme"),
+                cb_brand             = td.get("cb_brand"),
+                cb_service_indicator = td.get("cb_service_indicator"),
+                cb_sca_exemption     = td.get("cb_sca_exemption"),
+                cb_floor_limit       = td.get("cb_floor_limit"),
+                cb_is_contactless    = td.get("cb_is_contactless", False),
+                cb_response_code     = td.get("cb_response_code"),
+                cb_decline_reason    = td.get("cb_decline_reason"),
+                created_at           = td.get("created_at",
+                                               datetime.now(UTC).isoformat()),
+                processed_at         = td.get("processed_at"),
+            )
+            session.add(new_txn)
+            result["txns_inserted"] += 1
         except Exception as e:
             result["errors"].append("Transaction {} : {}".format(txn_id, str(e)))
             result["txns_skipped"] += 1
